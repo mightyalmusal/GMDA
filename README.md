@@ -100,6 +100,30 @@ Your access token is stored as a server-side environment variable. It is NEVER e
 
 ---
 
+## Step 7 — Persist data in SharePoint (recommended)
+
+Without persistent storage, serverless local files can reset after redeploys. Enable SharePoint-backed storage so mappings, budget/targets, settings, and cache survive updates.
+
+1. In Microsoft Entra, create an app registration for backend Graph access
+2. Add **Application** permissions for Microsoft Graph:
+   - `Sites.ReadWrite.All`
+3. Grant admin consent
+4. Create a client secret and copy its value
+5. In Netlify environment variables, add:
+   - `SP_STORAGE_ENABLED=true`
+   - `SP_TENANT_ID=<your-tenant-id>`
+   - `SP_CLIENT_ID=<backend-app-client-id>`
+   - `SP_CLIENT_SECRET=<backend-app-client-secret>`
+   - `SP_SITE_HOSTNAME=<yourtenant>.sharepoint.com`
+   - `SP_SITE_PATH=/sites/<your-site-name>`
+   - `SP_DOC_LIBRARY=Documents` (or your library name)
+   - `SP_FOLDER=MarketingHubData`
+6. Redeploy site
+
+Once enabled, app data is stored in SharePoint files under your chosen folder and remains available after redeploys.
+
+---
+
 ## Running locally (for development)
 
 Install the Netlify CLI to test your serverless function locally:

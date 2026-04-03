@@ -24,6 +24,14 @@ const ALLOWED_EMAILS = new Set(
     .map(v => v.trim().toLowerCase())
     .filter(Boolean)
 );
+  const SP_STORAGE_ENABLED = String(process.env.SP_STORAGE_ENABLED || "").trim().toLowerCase() === "true";
+  const SP_TENANT_ID = String(process.env.SP_TENANT_ID || AAD_TENANT_ID || "").trim();
+  const SP_CLIENT_ID = String(process.env.SP_CLIENT_ID || "").trim();
+  const SP_CLIENT_SECRET = String(process.env.SP_CLIENT_SECRET || "").trim();
+  const SP_SITE_HOSTNAME = String(process.env.SP_SITE_HOSTNAME || "").trim();
+  const SP_SITE_PATH = String(process.env.SP_SITE_PATH || "").trim();
+  const SP_DOC_LIBRARY = String(process.env.SP_DOC_LIBRARY || "Documents").trim();
+  const SP_FOLDER = String(process.env.SP_FOLDER || "MarketingHubData").trim();
 const DEFAULT_MAPPING_OPTIONS = {
   divisions: ["Retail", "Ecomm", "HR", "LSA", "Desktop", "LTS"],
   lobs: ["Desktop", "LTS", "LSA", "Brand Value", "Housebrand", "Lazada"],
@@ -70,6 +78,149 @@ const INSIGHTS_FIELDS = [
 
 let joseModPromise;
 let microsoftJwks;
+let graphAppTokenCache = { token: null, expiresAt: 0 };
+let sharePointSiteIdCache = null;
+let sharePointDriveIdCache = null;
+
+function isSharePointConfigured() {
+  return SP_STORAGE_ENABLED && !!SP_TENANT_ID && !!SP_CLIENT_ID && !!SP_CLIENT_SECRET && !!SP_SITE_HOSTNAME && !!SP_SITE_PATH;
+}
+
+function encodeGraphPath(pathValue) {
+  return String(pathValue || "")
+    .split("/")
+    .filter(Boolean)
+    .map(seg => encodeURIComponent(seg))
+    .join("/");
+}
+
+async function graphFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Graph request failed (${res.status}): ${text || res.statusText}`);
+  }
+  return res;
+}
+
+async function getGraphAppToken() {
+  if (graphAppTokenCache.token && Date.now() < graphAppTokenCache.expiresAt - 120000) {
+    return graphAppTokenCache.token;
+  }
+  const tokenUrl = `https://login.microsoftonline.com/${SP_TENANT_ID}/oauth2/v2.0/token`;
+  const body = new URLSearchParams({
+    client_id: SP_CLIENT_ID,
+    client_secret: SP_CLIENT_SECRET,
+    scope: "https://graph.microsoft.com/.default",
+    grant_type: "client_credentials",
+  });
+  const res = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to get SharePoint app token: ${text || res.statusText}`);
+  }
+  const json = await res.json();
+  graphAppTokenCache = {
+    token: json.access_token,
+    expiresAt: Date.now() + (Number(json.expires_in || 3600) * 1000),
+  };
+  return graphAppTokenCache.token;
+}
+
+async function getSharePointSiteId() {
+  if (sharePointSiteIdCache) return sharePointSiteIdCache;
+  const token = await getGraphAppToken();
+  const normalizedPath = SP_SITE_PATH.startsWith("/") ? SP_SITE_PATH : `/${SP_SITE_PATH}`;
+  const url = `https://graph.microsoft.com/v1.0/sites/${SP_SITE_HOSTNAME}:${normalizedPath}`;
+  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const json = await res.json();
+  sharePointSiteIdCache = json.id;
+  if (!sharePointSiteIdCache) throw new Error("Unable to resolve SharePoint site id");
+  return sharePointSiteIdCache;
+}
+
+async function getSharePointDriveId() {
+  if (sharePointDriveIdCache) return sharePointDriveIdCache;
+  const token = await getGraphAppToken();
+  const siteId = await getSharePointSiteId();
+  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`;
+  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const json = await res.json();
+  const drives = Array.isArray(json.value) ? json.value : [];
+  const drive = drives.find(d => String(d.name || "").toLowerCase() === SP_DOC_LIBRARY.toLowerCase()) || drives[0];
+  if (!drive?.id) throw new Error(`Unable to find SharePoint document library '${SP_DOC_LIBRARY}'`);
+  sharePointDriveIdCache = drive.id;
+  return sharePointDriveIdCache;
+}
+
+async function readStorageText(localPath, sharePointName) {
+  if (!isSharePointConfigured()) {
+    return fs.readFile(localPath, "utf8");
+  }
+  const token = await getGraphAppToken();
+  const driveId = await getSharePointDriveId();
+  const relPath = encodeGraphPath(`${SP_FOLDER}/${sharePointName}`);
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${relPath}:/content`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 404) {
+    const err = new Error("Not found");
+    err.code = "ENOENT";
+    throw err;
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to read SharePoint file '${sharePointName}': ${text || res.statusText}`);
+  }
+  return res.text();
+}
+
+async function writeStorageText(localPath, sharePointName, content) {
+  if (!isSharePointConfigured()) {
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    await fs.writeFile(localPath, content, "utf8");
+    return;
+  }
+  const token = await getGraphAppToken();
+  const driveId = await getSharePointDriveId();
+  const relPath = encodeGraphPath(`${SP_FOLDER}/${sharePointName}`);
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${relPath}:/content`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: String(content || ""),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to write SharePoint file '${sharePointName}': ${text || res.statusText}`);
+  }
+}
+
+async function deleteStorageFile(localPath, sharePointName) {
+  if (!isSharePointConfigured()) {
+    try {
+      await fs.unlink(localPath);
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    return;
+  }
+  const token = await getGraphAppToken();
+  const driveId = await getSharePointDriveId();
+  const relPath = encodeGraphPath(`${SP_FOLDER}/${sharePointName}`);
+  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${relPath}`;
+  const res = await fetch(url, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  if (![204, 404].includes(res.status)) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to delete SharePoint file '${sharePointName}': ${text || res.statusText}`);
+  }
+}
 
 function getBearerToken(headers = {}) {
   const value = headers.authorization || headers.Authorization || "";
@@ -245,7 +396,7 @@ function serializeIni(values) {
 
 async function loadSettingsIni() {
   try {
-    const raw = await fs.readFile(SETTINGS_FILE, "utf8");
+    const raw = await readStorageText(SETTINGS_FILE, "settings.ini");
     const parsed = parseIni(raw);
     return {
       accessToken: parsed.access_token || "",
@@ -275,7 +426,7 @@ async function loadSettingsIni() {
 
 async function saveSettingsIni(values) {
   const content = serializeIni(values);
-  await fs.writeFile(SETTINGS_FILE, content, "utf8");
+  await writeStorageText(SETTINGS_FILE, "settings.ini", content);
 }
 
 function normalizeIdentifierRow(row) {
@@ -291,7 +442,7 @@ function normalizeIdentifierRow(row) {
 
 async function loadMappingsFile() {
   try {
-    const raw = await fs.readFile(MAPPINGS_FILE, "utf8");
+    const raw = await readStorageText(MAPPINGS_FILE, "meta-mappings.json");
     const parsed = JSON.parse(raw);
     const list = Array.isArray(parsed?.identifiers) ? parsed.identifiers : [];
     return list.map(normalizeIdentifierRow).filter(r => r.adset || r.adsetId);
@@ -303,8 +454,7 @@ async function loadMappingsFile() {
 
 async function saveMappingsFile(identifiers) {
   const list = Array.isArray(identifiers) ? identifiers.map(normalizeIdentifierRow).filter(r => r.adset || r.adsetId) : [];
-  await fs.mkdir(CACHE_DIR, { recursive: true });
-  await fs.writeFile(MAPPINGS_FILE, JSON.stringify({ identifiers: list, updatedAt: new Date().toISOString() }), "utf8");
+  await writeStorageText(MAPPINGS_FILE, "meta-mappings.json", JSON.stringify({ identifiers: list, updatedAt: new Date().toISOString() }));
   return list;
 }
 
@@ -349,7 +499,7 @@ function normalizeBudgetTargets(payload) {
 
 async function loadBudgetTargetsFile() {
   try {
-    const raw = await fs.readFile(BUDGET_TARGETS_FILE, "utf8");
+    const raw = await readStorageText(BUDGET_TARGETS_FILE, "meta-budget-targets.json");
     const parsed = JSON.parse(raw);
     return normalizeBudgetTargets(parsed?.budgetTargets || parsed || {});
   } catch (err) {
@@ -362,14 +512,13 @@ async function loadBudgetTargetsFile() {
 
 async function saveBudgetTargetsFile(payload) {
   const budgetTargets = normalizeBudgetTargets(payload);
-  await fs.mkdir(CACHE_DIR, { recursive: true });
-  await fs.writeFile(BUDGET_TARGETS_FILE, JSON.stringify({ budgetTargets, updatedAt: new Date().toISOString() }), "utf8");
+  await writeStorageText(BUDGET_TARGETS_FILE, "meta-budget-targets.json", JSON.stringify({ budgetTargets, updatedAt: new Date().toISOString() }));
   return budgetTargets;
 }
 
 async function loadCache() {
   try {
-    const raw = await fs.readFile(CACHE_FILE, "utf8");
+    const raw = await readStorageText(CACHE_FILE, "meta-insights-cache.json");
     const parsed = JSON.parse(raw);
     return {
       rows: Array.isArray(parsed.rows) ? parsed.rows : [],
@@ -423,24 +572,17 @@ async function loadCache() {
 }
 
 async function saveCache(rows, meta = {}) {
-  await fs.mkdir(CACHE_DIR, { recursive: true });
-  await fs.writeFile(CACHE_FILE, JSON.stringify({ rows, ...meta }), "utf8");
+  await writeStorageText(CACHE_FILE, "meta-insights-cache.json", JSON.stringify({ rows, ...meta }));
 }
 
 async function clearCache() {
-  const files = [CACHE_FILE, LEGACY_CACHE_FILE];
-  for (const filePath of files) {
-    try {
-      await fs.unlink(filePath);
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-  }
+  await deleteStorageFile(CACHE_FILE, "meta-insights-cache.json");
+  if (!isSharePointConfigured()) await deleteStorageFile(LEGACY_CACHE_FILE, "meta-insights-cache-legacy.json");
 }
 
 async function loadStatus() {
   try {
-    const raw = await fs.readFile(STATUS_FILE, "utf8");
+    const raw = await readStorageText(STATUS_FILE, "meta-insights-status.json");
     return JSON.parse(raw);
   } catch (err) {
     if (err.code === "ENOENT") {
@@ -451,8 +593,7 @@ async function loadStatus() {
 }
 
 async function saveStatus(status) {
-  await fs.mkdir(CACHE_DIR, { recursive: true });
-  await fs.writeFile(STATUS_FILE, JSON.stringify({ ...status, updatedAt: new Date().toISOString() }), "utf8");
+  await writeStorageText(STATUS_FILE, "meta-insights-status.json", JSON.stringify({ ...status, updatedAt: new Date().toISOString() }));
 }
 
 async function clearStatus() {
