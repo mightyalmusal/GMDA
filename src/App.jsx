@@ -129,6 +129,15 @@ async function saveBudgetTargetsToApi(payload){
 async function importCacheToApi(cachePayload){
   return postMetaApi({action:"import_cache",cache:cachePayload||{}});
 }
+async function startChunkedImportToApi(metaPayload){
+  return postMetaApi({action:"import_cache_start",meta:metaPayload||{}});
+}
+async function appendChunkedImportToApi(rows){
+  return postMetaApi({action:"import_cache_append",rows:Array.isArray(rows)?rows:[]});
+}
+async function finalizeChunkedImportToApi(){
+  return postMetaApi({action:"import_cache_finalize"});
+}
 
 function applyIdentifiers(rows,identifiers){
   return rows.map(r=>{
@@ -1759,7 +1768,24 @@ export default function App(){
     try{
       const text=await file.text();
       const parsed=JSON.parse(text);
-      const r=await importCacheToApi(parsed);
+      const allRows=Array.isArray(parsed?.rows)?parsed.rows:(Array.isArray(parsed?.data)?parsed.data:[]);
+      const sizeBytes=file.size||new Blob([text]).size;
+      const shouldChunk=sizeBytes>4_500_000||allRows.length>4000;
+      let r;
+      if(!shouldChunk){
+        r=await importCacheToApi(parsed);
+      }else{
+        const metaPayload={...(parsed&&typeof parsed==="object"?parsed:{})};
+        delete metaPayload.rows;
+        delete metaPayload.data;
+        await startChunkedImportToApi(metaPayload);
+        const chunkSize=1000;
+        for(let i=0;i<allRows.length;i+=chunkSize){
+          const chunk=allRows.slice(i,i+chunkSize);
+          await appendChunkedImportToApi(chunk);
+        }
+        r=await finalizeChunkedImportToApi();
+      }
       setRawData(r.data||[]);
       setFetchMeta(r.meta||null);
       setSyncStatus(null);

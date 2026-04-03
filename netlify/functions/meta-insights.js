@@ -14,6 +14,7 @@ const BUDGET_TARGETS_FILE = path.join(CACHE_DIR, "meta-budget-targets.json");
 // Legacy cache location used by earlier builds; retained for one-time migration.
 const LEGACY_CACHE_FILE = path.join(process.cwd(), ".cache", "meta-insights-cache.json");
 const STATUS_FILE = path.join(CACHE_DIR, "meta-insights-status.json");
+const IMPORT_BUFFER_FILE = path.join(CACHE_DIR, "meta-insights-import-buffer.json");
 const SETTINGS_FILE = path.join(process.cwd(), "settings.ini");
 const AAD_TENANT_ID = (process.env.AAD_TENANT_ID || "973ec11f-980d-4bd7-9443-fe528f0a752b").trim();
 const AAD_CLIENT_ID = (process.env.AAD_CLIENT_ID || "e7c8038f-4c5a-4be8-bce1-a3d42e0e38f5").trim();
@@ -677,6 +678,32 @@ async function clearCache() {
   if (!isSharePointConfigured()) await deleteStorageFile(LEGACY_CACHE_FILE, "meta-insights-cache-legacy.json");
 }
 
+async function loadImportBuffer() {
+  try {
+    const raw = await readStorageText(IMPORT_BUFFER_FILE, "meta-insights-import-buffer.json");
+    const parsed = JSON.parse(raw);
+    return {
+      rows: Array.isArray(parsed?.rows) ? parsed.rows.filter(r => r && typeof r === "object") : [],
+      meta: parsed?.meta && typeof parsed.meta === "object" ? parsed.meta : {},
+    };
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      return { rows: [], meta: {} };
+    }
+    throw err;
+  }
+}
+
+async function saveImportBuffer(payload) {
+  const rows = Array.isArray(payload?.rows) ? payload.rows.filter(r => r && typeof r === "object") : [];
+  const meta = payload?.meta && typeof payload.meta === "object" ? payload.meta : {};
+  await writeStorageText(IMPORT_BUFFER_FILE, "meta-insights-import-buffer.json", JSON.stringify({ rows, meta }));
+}
+
+async function clearImportBuffer() {
+  await deleteStorageFile(IMPORT_BUFFER_FILE, "meta-insights-import-buffer.json");
+}
+
 async function loadStatus() {
   try {
     const raw = await readStorageText(STATUS_FILE, "meta-insights-status.json");
@@ -1083,6 +1110,83 @@ exports.handler = async function (event) {
       };
     } catch (err) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: `Failed to import cache JSON: ${err.message}` }) };
+    }
+  }
+
+  if (action === "import_cache_start") {
+    try {
+      const meta = body.meta && typeof body.meta === "object" ? body.meta : {};
+      await saveImportBuffer({ rows: [], meta });
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ ok: true, importedRows: 0 }),
+      };
+    } catch (err) {
+      return { statusCode: 500, headers, body: JSON.stringify({ error: `Failed to start cache import: ${err.message}` }) };
+    }
+  }
+
+  if (action === "import_cache_append") {
+    try {
+      const chunkRows = Array.isArray(body.rows) ? body.rows.filter(r => r && typeof r === "object") : [];
+      if (!chunkRows.length) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "rows chunk is required" }) };
+      }
+      const buffer = await loadImportBuffer();
+      const nextRows = [...buffer.rows, ...chunkRows];
+      await saveImportBuffer({ rows: nextRows, meta: buffer.meta });
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ ok: true, importedRows: nextRows.length }),
+      };
+    } catch (err) {
+      return { statusCode: 500, headers, body: JSON.stringify({ error: `Failed to append cache chunk: ${err.message}` }) };
+    }
+  }
+
+  if (action === "import_cache_finalize") {
+    try {
+      const buffer = await loadImportBuffer();
+      const imported = normalizeImportedCache({ ...(buffer.meta || {}), rows: buffer.rows || [] });
+      await saveCache(imported.rows, {
+        fetchedAt: imported.fetchedAt,
+        since: imported.since,
+        until: imported.until,
+        accountsQueried: imported.accountsQueried,
+        accountsSucceeded: imported.accountsSucceeded,
+        errors: imported.errors,
+        businessNames: imported.businessNames,
+        discoveredAccounts: imported.discoveredAccounts,
+        cacheLastDate: imported.cacheLastDate,
+      });
+      await clearImportBuffer();
+      await clearStatus();
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          ok: true,
+          data: imported.rows,
+          meta: {
+            totalRows: imported.rows.length,
+            fetchedAt: imported.fetchedAt,
+            since: imported.since,
+            until: imported.until,
+            accountsQueried: imported.accountsQueried,
+            accountsSucceeded: imported.accountsSucceeded,
+            discoveredAccounts: imported.discoveredAccounts,
+            errors: imported.errors,
+            businessNames: imported.businessNames,
+            cacheLastDate: imported.cacheLastDate,
+            fromCache: true,
+            imported: true,
+          },
+        }),
+      };
+    } catch (err) {
+      return { statusCode: 500, headers, body: JSON.stringify({ error: `Failed to finalize cache import: ${err.message}` }) };
     }
   }
 
