@@ -66,6 +66,7 @@ const DEFAULT_MAPPING_OPTIONS = {
 
 const INSIGHTS_FIELDS = [
   "campaign_name",
+  "adset_id",
   "adset_name",
   "account_name",
   "account_currency",
@@ -389,7 +390,7 @@ function latestDate(rows) {
 }
 
 function mergeRows(existingRows, newRows) {
-  const keyOf = r => `${r.account_id || ""}|${r.adset_name || ""}|${r.day || ""}`;
+  const keyOf = r => `${r.account_id || ""}|${r.adset_id || r.adset_name || ""}|${r.day || ""}`;
   const map = new Map(existingRows.map(r => [keyOf(r), r]));
   newRows.forEach(r => map.set(keyOf(r), r));
   return [...map.values()].sort((a, b) => (a.day || "").localeCompare(b.day || ""));
@@ -802,6 +803,7 @@ async function fetchInsightsForAccount(adAccountId, datePreset, since, until, ac
 
       rows.push({
         campaign_name: row.campaign_name,
+        adset_id: row.adset_id,
         adset_name: row.adset_name,
         day: row.date_start,
         account_name: row.account_name,
