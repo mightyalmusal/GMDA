@@ -24,6 +24,9 @@ const ALLOWED_EMAILS = new Set(
     .map(v => v.trim().toLowerCase())
     .filter(Boolean)
 );
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").trim().replace(/\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+const SUPABASE_TABLE = String(process.env.SUPABASE_TABLE || "app_state").trim();
   const SP_STORAGE_ENABLED = String(process.env.SP_STORAGE_ENABLED || "").trim().toLowerCase() === "true";
   const SP_TENANT_ID = String(process.env.SP_TENANT_ID || AAD_TENANT_ID || "").trim();
   const SP_CLIENT_ID = String(process.env.SP_CLIENT_ID || "").trim();
@@ -84,6 +87,61 @@ let sharePointDriveIdCache = null;
 
 function isSharePointConfigured() {
   return SP_STORAGE_ENABLED && !!SP_TENANT_ID && !!SP_CLIENT_ID && !!SP_CLIENT_SECRET && !!SP_SITE_HOSTNAME && !!SP_SITE_PATH;
+}
+
+function isSupabaseConfigured() {
+  return !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
+}
+
+function supabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    "Content-Type": "application/json",
+    ...extra,
+  };
+}
+
+async function readSupabaseText(key) {
+  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?key=eq.${encodeURIComponent(key)}&select=value&limit=1`;
+  const res = await fetch(url, { headers: supabaseHeaders() });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to read Supabase key '${key}': ${text || res.statusText}`);
+  }
+  const rows = await res.json();
+  if (!Array.isArray(rows) || !rows.length) {
+    const err = new Error("Not found");
+    err.code = "ENOENT";
+    throw err;
+  }
+  return typeof rows[0].value === "string" ? rows[0].value : JSON.stringify(rows[0].value ?? null);
+}
+
+async function writeSupabaseText(key, content) {
+  const payload = [{ key, value: String(content || "") }];
+  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: supabaseHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to write Supabase key '${key}': ${text || res.statusText}`);
+  }
+}
+
+async function deleteSupabaseKey(key) {
+  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?key=eq.${encodeURIComponent(key)}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: supabaseHeaders({ Prefer: "return=minimal" }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to delete Supabase key '${key}': ${text || res.statusText}`);
+  }
 }
 
 function encodeGraphPath(pathValue) {
@@ -158,6 +216,9 @@ async function getSharePointDriveId() {
 }
 
 async function readStorageText(localPath, sharePointName) {
+  if (isSupabaseConfigured()) {
+    return readSupabaseText(sharePointName);
+  }
   if (!isSharePointConfigured()) {
     return fs.readFile(localPath, "utf8");
   }
@@ -179,6 +240,10 @@ async function readStorageText(localPath, sharePointName) {
 }
 
 async function writeStorageText(localPath, sharePointName, content) {
+  if (isSupabaseConfigured()) {
+    await writeSupabaseText(sharePointName, content);
+    return;
+  }
   if (!isSharePointConfigured()) {
     await fs.mkdir(path.dirname(localPath), { recursive: true });
     await fs.writeFile(localPath, content, "utf8");
@@ -203,6 +268,10 @@ async function writeStorageText(localPath, sharePointName, content) {
 }
 
 async function deleteStorageFile(localPath, sharePointName) {
+  if (isSupabaseConfigured()) {
+    await deleteSupabaseKey(sharePointName);
+    return;
+  }
   if (!isSharePointConfigured()) {
     try {
       await fs.unlink(localPath);

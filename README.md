@@ -124,6 +124,31 @@ Once enabled, app data is stored in SharePoint files under your chosen folder an
 
 ---
 
+## Step 8 — Persist data in Supabase (free alternative)
+
+If SharePoint admin consent takes time, use Supabase as a durable store.
+
+1. Create a Supabase project
+2. Open SQL Editor and run:
+
+```sql
+create table if not exists public.app_state (
+   key text primary key,
+   value text not null,
+   updated_at timestamptz not null default now()
+);
+```
+
+3. In Netlify environment variables, add:
+    - `SUPABASE_URL=https://<project-ref>.supabase.co`
+    - `SUPABASE_SERVICE_ROLE_KEY=<service_role_key>`
+    - `SUPABASE_TABLE=app_state`
+4. Redeploy
+
+When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, backend persistence uses Supabase first (settings/mappings/budget-target/cache/status), so data survives redeploys.
+
+---
+
 ## Running locally (for development)
 
 Install the Netlify CLI to test your serverless function locally:
