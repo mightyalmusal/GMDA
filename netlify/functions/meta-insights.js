@@ -27,6 +27,9 @@ const ALLOWED_EMAILS = new Set(
 const SUPABASE_URL = String(process.env.SUPABASE_URL || "").trim().replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
 const SUPABASE_TABLE = String(process.env.SUPABASE_TABLE || "app_state").trim();
+const META_ACCESS_TOKEN_ENV = String(process.env.META_ACCESS_TOKEN || "").trim();
+const META_APP_ID_ENV = String(process.env.META_APP_ID || "").trim();
+const META_APP_SECRET_ENV = String(process.env.META_APP_SECRET || "").trim();
   const SP_STORAGE_ENABLED = String(process.env.SP_STORAGE_ENABLED || "").trim().toLowerCase() === "true";
   const SP_TENANT_ID = String(process.env.SP_TENANT_ID || AAD_TENANT_ID || "").trim();
   const SP_CLIENT_ID = String(process.env.SP_CLIENT_ID || "").trim();
@@ -423,6 +426,10 @@ function parseIni(content) {
   return result;
 }
 
+function resolveMetaAccessToken(requestToken = "", settingsToken = "") {
+  return String(META_ACCESS_TOKEN_ENV || requestToken || settingsToken || "").trim();
+}
+
 function sanitizeOptionList(value, fallback = []) {
   if (!Array.isArray(value)) return [...fallback];
   const cleaned = [...new Set(value.map(v => String(v || "").trim()).filter(Boolean))];
@@ -440,10 +447,7 @@ function parseOptionList(raw, fallback = []) {
 }
 
 function serializeIni(values) {
-  const accessToken = String(values.accessToken || "").replace(/\r?\n/g, "").trim();
   const businessAccountId = String(values.businessAccountId || "").replace(/\r?\n/g, "").trim();
-  const appId = String(values.appId || "").replace(/\r?\n/g, "").trim();
-  const appSecret = String(values.appSecret || "").replace(/\r?\n/g, "").trim();
   const mappingOptions = values.mappingOptions || {};
   const divisions = JSON.stringify(sanitizeOptionList(mappingOptions.divisions, DEFAULT_MAPPING_OPTIONS.divisions));
   const lobs = JSON.stringify(sanitizeOptionList(mappingOptions.lobs, DEFAULT_MAPPING_OPTIONS.lobs));
@@ -451,10 +455,7 @@ function serializeIni(values) {
   const objectives = JSON.stringify(sanitizeOptionList(mappingOptions.objectives, DEFAULT_MAPPING_OPTIONS.objectives));
   return [
     "[meta]",
-    `access_token=${accessToken}`,
     `business_account_ids=${businessAccountId}`,
-    `app_id=${appId}`,
-    `app_secret=${appSecret}`,
     `mapping_divisions=${divisions}`,
     `mapping_lobs=${lobs}`,
     `mapping_segments=${segments}`,
@@ -468,10 +469,13 @@ async function loadSettingsIni() {
     const raw = await readStorageText(SETTINGS_FILE, "settings.ini");
     const parsed = parseIni(raw);
     return {
-      accessToken: parsed.access_token || "",
+      accessToken: "",
       businessAccountId: parsed.business_account_ids || "",
-      appId: parsed.app_id || "",
-      appSecret: parsed.app_secret || "",
+      appId: META_APP_ID_ENV || "",
+      appSecret: "",
+      metaTokenConfigured: Boolean(META_ACCESS_TOKEN_ENV),
+      metaAppConfigured: Boolean(META_APP_ID_ENV),
+      metaAppSecretConfigured: Boolean(META_APP_SECRET_ENV),
       mappingOptions: {
         divisions: parseOptionList(parsed.mapping_divisions, DEFAULT_MAPPING_OPTIONS.divisions),
         lobs: parseOptionList(parsed.mapping_lobs, DEFAULT_MAPPING_OPTIONS.lobs),
@@ -484,8 +488,11 @@ async function loadSettingsIni() {
       return {
         accessToken: "",
         businessAccountId: "",
-        appId: "",
+        appId: META_APP_ID_ENV || "",
         appSecret: "",
+        metaTokenConfigured: Boolean(META_ACCESS_TOKEN_ENV),
+        metaAppConfigured: Boolean(META_APP_ID_ENV),
+        metaAppSecretConfigured: Boolean(META_APP_SECRET_ENV),
         mappingOptions: { ...DEFAULT_MAPPING_OPTIONS },
       };
     }
@@ -969,10 +976,7 @@ exports.handler = async function (event) {
   if (action === "save_settings") {
     try {
       await saveSettingsIni({
-        accessToken: body.accessToken || "",
         businessAccountId: body.businessAccountId || "",
-        appId: body.appId || "",
-        appSecret: body.appSecret || "",
         mappingOptions: body.mappingOptions || DEFAULT_MAPPING_OPTIONS,
       });
       const settings = await loadSettingsIni();
@@ -1038,7 +1042,10 @@ exports.handler = async function (event) {
     }
   }
 
-  if (!accessToken) {
+  const savedSettings = await loadSettingsIni();
+  const effectiveAccessToken = resolveMetaAccessToken(accessToken, savedSettings.accessToken || "");
+
+  if (!effectiveAccessToken) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "accessToken is required" }) };
   }
 
@@ -1074,13 +1081,13 @@ exports.handler = async function (event) {
 
     const businessNames = [];
     for (const bid of businessIds) {
-      const name = await fetchBusinessName(bid, accessToken);
+      const name = await fetchBusinessName(bid, effectiveAccessToken);
       if (name) businessNames.push(name);
     }
 
     let adAccountIds;
     try {
-      adAccountIds = await fetchAdAccountIds(accessToken, businessIds);
+      adAccountIds = await fetchAdAccountIds(effectiveAccessToken, businessIds);
     } catch (e) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: `Failed to discover ad accounts: ${e.message}` }) };
     }
@@ -1122,7 +1129,7 @@ exports.handler = async function (event) {
       });
 
       try {
-        const rows = await fetchInsightsWithRetry(id, datePreset, syncSince, syncUntil, accessToken);
+        const rows = await fetchInsightsWithRetry(id, datePreset, syncSince, syncUntil, effectiveAccessToken);
         fetchedRows.push(...rows);
         accountStatuses[i] = { accountId: id, status: "success", rows: rows.length, error: null };
       } catch (err) {

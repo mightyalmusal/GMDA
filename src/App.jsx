@@ -97,7 +97,7 @@ async function loadSettingsFromApi(){
   return res.json();
 }
 async function saveSettingsToApi(accessToken,businessAccountId,appId,appSecret,mappingOptions){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_settings",accessToken:accessToken||"",businessAccountId:businessAccountId||"",appId:appId||"",appSecret:appSecret||"",mappingOptions:mappingOptions||DEFAULT_MAPPING_OPTIONS})});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_settings",businessAccountId:businessAccountId||"",mappingOptions:mappingOptions||DEFAULT_MAPPING_OPTIONS})});
   if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
   return res.json();
 }
@@ -984,7 +984,7 @@ function DataView({data,fetchMeta,syncStatus,onFacebookLogin,loginBusy,appId,tok
         )}
       </div>
       <div style={{fontSize:12,color:"#64748B",marginTop:8}}>
-        {appId?`Using App ID ${appId}`:"Set App ID in Settings first, then click Login with Facebook."}
+        {appId?`Using App ID ${appId}`:"Set META_APP_ID in Netlify environment variables, then click Login with Facebook."}
       </div>
     </div>
     {syncStatus?.inProgress&&(
@@ -1096,24 +1096,24 @@ function Settings({settings,setSettings,identifiers,toast,persistServerSettings}
   };
   const removeOption=(k,val)=>setLoc(p=>({...p,mappingOptions:{...(p.mappingOptions||DEFAULT_MAPPING_OPTIONS),[k]:listOf(k).filter(v=>v!==val)}}));
   const save=async()=>{
-    setSettings(loc);
-    saveLS({...loc,identifiers});
+    const next={...loc,accessToken:"",appSecret:""};
+    setSettings(next);
+    saveLS({...next,identifiers});
     try{
-      await persistServerSettings(loc.accessToken||"",loc.businessAccountId||"",loc.appId||"",loc.appSecret||"",loc.mappingOptions||DEFAULT_MAPPING_OPTIONS);
+      await persistServerSettings("",next.businessAccountId||"",next.appId||"","",next.mappingOptions||DEFAULT_MAPPING_OPTIONS);
       toast("Settings saved ✓");
     }catch(e){
-      toast(`Saved locally, but failed to write settings.ini: ${e.message||"Unknown error"}`,true);
+      toast(`Saved locally, but failed to write settings storage: ${e.message||"Unknown error"}`,true);
     }
   };
 
   return(<div>
     <div className="card">
       <div className="sec-ttl">Meta Access Token</div>
-      <div className="info-box" style={{marginBottom:11}}>Paste your Meta User Access Token below. The app will automatically detect all ad accounts linked to this token when using Live Meta API mode.</div>
-      <div><label>Access Token</label><input type="password" placeholder="Paste your Meta access token here..." value={loc.accessToken||""} onChange={e=>setLoc(p=>({...p,accessToken:e.target.value}))} /></div>
+      <div className="info-box" style={{marginBottom:11}}>Meta Access Token, Meta App ID, and Meta App Secret are now managed via Netlify environment variables only for better security.</div>
       <div><label>Business Account IDs <span style={{fontWeight:400,color:"#64748B"}}>(optional — comma-separated, owned accounts only)</span></label><input type="text" placeholder="e.g. 123456789012345, 678901234567890" value={loc.businessAccountId||""} onChange={e=>setLoc(p=>({...p,businessAccountId:e.target.value}))} /></div>
-      <div><label>Meta App ID <span style={{fontWeight:400,color:"#64748B"}}>(for Login with Facebook)</span></label><input type="text" placeholder="e.g. 123456789012345" value={loc.appId||""} onChange={e=>setLoc(p=>({...p,appId:e.target.value}))} /></div>
-      <div><label>Meta App Secret <span style={{fontWeight:400,color:"#64748B"}}>(stored server-side; optional for now)</span></label><input type="password" placeholder="App Secret" value={loc.appSecret||""} onChange={e=>setLoc(p=>({...p,appSecret:e.target.value}))} /></div>
+      <div><label>Meta App ID <span style={{fontWeight:400,color:"#64748B"}}>(from server env)</span></label><input type="text" value={loc.appId||"Not configured"} disabled /></div>
+      <div><label>Meta App Secret <span style={{fontWeight:400,color:"#64748B"}}>(from server env)</span></label><input type="text" value={loc.metaAppSecretConfigured?"Configured":"Not configured"} disabled /></div>
     </div>
     <div className="card">
       <div className="sec-ttl">Mapping Selection Lists</div>
@@ -1134,7 +1134,7 @@ function Settings({settings,setSettings,identifiers,toast,persistServerSettings}
           </div>
         </div>
       ))}
-      <div style={{fontSize:11,color:"#64748B"}}>These lists are used by the Mapping page dropdown selections and saved to settings.ini.</div>
+      <div style={{fontSize:11,color:"#64748B"}}>These lists are used by the Mapping page dropdown selections and saved to persistent storage.</div>
     </div>
     <div style={{display:"flex",gap:9}}><button className="btn btn-p" onClick={save}>Save Settings</button><button className="btn" onClick={()=>setLoc({...settings})}>Discard</button></div>
   </div>);
@@ -1466,7 +1466,8 @@ const NAV=[
 const PT={overview:"Monthly Overview",breakdown:"Monthly Breakdown",desktop:"Desktop Dashboard",lts:"LTS Dashboard",lsa:"LSA Dashboard",trends:"Trends & Graphs",settings:"Settings",budget:"Budget and Target",mapping:"Mapping",data:"Data"};
 
 export default function App(){
-  const saved=loadLS();
+  const savedRaw=loadLS();
+  const saved=savedRaw?{...savedRaw,accessToken:"",appSecret:""}:null;
   const [page,setPage]=useState("overview");
   const [navCollapsed,setNavCollapsed]=useState(false);
   const [theme,setTheme]=useState(loadTheme);
@@ -1605,15 +1606,16 @@ export default function App(){
     try{
       const r=await loadSettingsFromApi();
       const server=r?.settings||{};
-      if(server.accessToken||server.businessAccountId||server.appId||server.appSecret||server.mappingOptions){
+      if(server.businessAccountId||server.appId||server.mappingOptions||server.metaTokenConfigured!=null){
         setSettings(prev=>({
           ...prev,
-          accessToken:server.accessToken||prev.accessToken||"",
+          accessToken:"",
           businessAccountId:server.businessAccountId||prev.businessAccountId||"",
           appId:server.appId||prev.appId||"",
-          appSecret:server.appSecret||prev.appSecret||"",
+          appSecret:"",
           mappingOptions:server.mappingOptions||prev.mappingOptions||DEFAULT_MAPPING_OPTIONS,
         }));
+        if(server.metaTokenConfigured===false)setTokenStatus("invalid");
       }
     }catch{/* optional settings file; ignore on startup */}
   },[]);
@@ -1668,7 +1670,7 @@ export default function App(){
 
   const loginWithFacebook=useCallback(async()=>{
     if(!settings.appId?.trim()){
-      showToast("Add Meta App ID in Settings first",true);
+      showToast("Set META_APP_ID in Netlify environment variables first",true);
       return;
     }
     const redirectUri=`${window.location.origin}${window.location.pathname}`;
@@ -1708,12 +1710,12 @@ export default function App(){
         window.clearInterval(poll);
         setLoginBusy(false);
         if(!token){showToast("Login completed but token was not returned.",true);return;}
-        const next={...settings,accessToken:token};
+        const next={...settings,accessToken:"",appSecret:""};
         setSettings(next);
         saveLS({...next,identifiers});
-        await persistServerSettings(token,next.businessAccountId||"",next.appId||"",next.appSecret||"",next.mappingOptions||DEFAULT_MAPPING_OPTIONS);
+        await persistServerSettings("",next.businessAccountId||"",next.appId||"","",next.mappingOptions||DEFAULT_MAPPING_OPTIONS);
         setTokenStatus("valid");
-        showToast("Facebook login succeeded. Token saved ✓");
+        showToast("Facebook login succeeded ✓");
       }catch{
         // Ignore cross-origin reads until popup returns to redirect URI.
       }
@@ -1743,7 +1745,6 @@ export default function App(){
   },[]);
 
   const fetchData=useCallback(async()=>{
-    if(!settings.accessToken?.trim()){showToast("Add your Access Token in Settings",true);return;}
     setLoading(true);setApiErrors([]);
     setSyncStatus({inProgress:true,message:"Starting sync…",totalAccounts:0,completedAccounts:0,currentAccountIndex:0,currentAccountId:null,startedAt:new Date().toISOString()});
     let pollId=null;
@@ -1769,7 +1770,7 @@ export default function App(){
 
         if(effectiveErrors.length){
           setApiErrors(effectiveErrors);
-          if(hasTokenError)showToast("Access token is expired/invalid. Update token in Settings and save again.",true);
+          if(hasTokenError)showToast("Access token is expired/invalid. Update META_ACCESS_TOKEN in Netlify environment variables.",true);
           else showToast(`Fetched with ${effectiveErrors.length} error(s)`,true);
         }else if(r.meta?.syncedNow===false){
           setApiErrors([]);
@@ -1791,7 +1792,7 @@ export default function App(){
       try{const p=await loadSyncStatusFromApi();if(p.status)setSyncStatus(p.status);}catch{}
       setLoading(false);
     }
-  },[settings.accessToken,settings.businessAccountId]);
+  },[settings.businessAccountId]);
 
   useEffect(()=>{
     if(!orgAccount)return;
