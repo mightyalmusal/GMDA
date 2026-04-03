@@ -676,11 +676,42 @@ async function clearStatus() {
   await saveStatus({ inProgress: false, updatedAt: new Date().toISOString() });
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 45000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(`Request timeout after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function shortText(text, max = 220) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max)}...` : s;
+}
+
+async function fetchJsonOrText(url, options = {}, timeoutMs = 45000) {
+  const res = await fetchWithTimeout(url, options, timeoutMs);
+  const text = await res.text().catch(() => "");
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { res, json, text };
+}
+
 async function fetchBusinessName(businessId, accessToken) {
   try {
     const params = new URLSearchParams({ fields: "name", access_token: accessToken });
-    const res = await fetch(`${META_BASE}/${businessId}?${params}`);
-    const json = await res.json();
+    const { json } = await fetchJsonOrText(`${META_BASE}/${businessId}?${params}`);
     if (json.error) return null;
     return json.name || null;
   } catch {
@@ -693,8 +724,7 @@ async function fetchOwnedAdAccountsForBusiness(accessToken, businessId) {
   const params = new URLSearchParams({ fields: "account_id,name", access_token: accessToken, limit: 100 });
   let url = `${META_BASE}/${businessId}/owned_ad_accounts?${params}`;
   while (url) {
-    const res = await fetch(url);
-    const json = await res.json();
+    const { json } = await fetchJsonOrText(url);
     if (json.error) throw new Error(`Business ${businessId} lookup failed: ${json.error.message}`);
     (json.data || []).forEach(a => ids.push(a.account_id));
     url = json.paging?.next || null;
@@ -718,8 +748,7 @@ async function fetchAdAccountIds(accessToken, businessIds = []) {
   const params = new URLSearchParams({ fields: "account_id,name", access_token: accessToken, limit: 100 });
   let url = `${META_BASE}/me/adaccounts?${params}`;
   while (url) {
-    const res = await fetch(url);
-    const json = await res.json();
+    const { json } = await fetchJsonOrText(url);
     if (json.error) throw new Error(json.error.message);
     (json.data || []).forEach(a => ids.push(a.account_id));
     url = json.paging?.next || null;
@@ -749,8 +778,14 @@ async function fetchInsightsForAccount(adAccountId, datePreset, since, until, ac
   const rows = [];
 
   while (url) {
-    const res = await fetch(url);
-    const json = await res.json();
+    const { res, json, text } = await fetchJsonOrText(url, {}, 60000);
+    if (!res.ok) {
+      if (json?.error) throw new Error(formatMetaError(json.error, adAccountId));
+      throw new Error(`Meta API error for account ${adAccountId}: HTTP ${res.status} ${shortText(text)}`);
+    }
+    if (!json || typeof json !== "object") {
+      throw new Error(`Meta API error for account ${adAccountId}: Non-JSON response ${shortText(text)}`);
+    }
     if (json.error) throw new Error(formatMetaError(json.error, adAccountId));
 
     const data = json.data || [];
@@ -808,6 +843,11 @@ function isUnknownMetaError(message = "") {
   return String(message).toLowerCase().includes("unknown error occurred");
 }
 
+function isInactivityTimeoutError(message = "") {
+  const msg = String(message).toLowerCase();
+  return msg.includes("inactivity timeout") || msg.includes("too much time has passed without sending any data") || msg.includes("request timeout") || msg.includes("timed out") || msg.includes("non-json response");
+}
+
 function isRangeTooLargeError(message = "") {
   const msg = String(message).toLowerCase();
   return msg.includes("please reduce the amount of data") || msg.includes("reduce the amount of data") || msg.includes("request code=1");
@@ -828,7 +868,7 @@ async function fetchInsightsWithRetry(adAccountId, datePreset, since, until, acc
       return await fetchInsightsForAccount(adAccountId, datePreset, since, until, accessToken);
     } catch (err) {
       const message = err?.message || "Unknown Meta API error";
-      const retryable = isRateLimitError(message) || isUnknownMetaError(message) || isRangeTooLargeError(message);
+      const retryable = isRateLimitError(message) || isUnknownMetaError(message) || isRangeTooLargeError(message) || isInactivityTimeoutError(message);
 
       if (isRangeTooLargeError(message) && since && until && since !== until) {
         const mid = midDateISO(since, until);
@@ -847,6 +887,14 @@ async function fetchInsightsWithRetry(adAccountId, datePreset, since, until, acc
           day = addDaysISO(day, 1);
         }
         return rows;
+      }
+
+      if (isInactivityTimeoutError(message) && since && until && since !== until) {
+        const mid = midDateISO(since, until);
+        const next = addDaysISO(mid, 1);
+        const left = await fetchInsightsWithRetry(adAccountId, datePreset, since, mid, accessToken, 1);
+        const right = compareISO(next, until) <= 0 ? await fetchInsightsWithRetry(adAccountId, datePreset, next, until, accessToken, 1) : [];
+        return [...left, ...right];
       }
 
       if (!retryable || attempt === maxRetries) throw new Error(message);
