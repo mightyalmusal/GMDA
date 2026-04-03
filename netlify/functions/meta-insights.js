@@ -1119,7 +1119,7 @@ exports.handler = async function (event) {
     const yday = yesterdayISO();
     const initialSince = since || "2025-01-01";
     const cacheLastDate = cache.cacheLastDate || latestDate(cache.rows);
-    const syncSince = cacheLastDate ? addDaysISO(cacheLastDate, 1) : initialSince;
+    const syncSince = startIndex > 0 ? initialSince : (cacheLastDate ? addDaysISO(cacheLastDate, 1) : initialSince);
     const syncUntil = until || yday;
 
     // Nothing new to fetch; return cache only.

@@ -93,8 +93,11 @@ async function postMetaApi(payload){
   return res.json().catch(()=>({}));
 }
 
-async function fetchLiveData(accessToken,businessAccountId,startIndex=0){
-  return postMetaApi({accessToken,businessAccountId:businessAccountId||undefined,startIndex});
+async function fetchLiveData(accessToken,businessAccountId,startIndex=0,since=null,until=null){
+  const payload={accessToken,businessAccountId:businessAccountId||undefined,startIndex};
+  if(since)payload.since=since;
+  if(until)payload.until=until;
+  return postMetaApi(payload);
 }
 async function loadCachedFromApi(){
   return postMetaApi({action:"load"});
@@ -1756,9 +1759,13 @@ export default function App(){
     pollId=setInterval(poll,1200);
     try{
       let startIndex=0;
+      let batchSince=null;
+      let batchUntil=null;
       let r=null;
       for(let i=0;i<100;i++){
-        r=await fetchLiveData(settings.accessToken,settings.businessAccountId,startIndex);
+        r=await fetchLiveData(settings.accessToken,settings.businessAccountId,startIndex,batchSince,batchUntil);
+        if(!batchSince&&r?.meta?.syncSince)batchSince=r.meta.syncSince;
+        if(!batchUntil&&r?.meta?.syncUntil)batchUntil=r.meta.syncUntil;
         if(!r?.meta?.partial)break;
         startIndex=Number(r.meta.nextAccountIndex||0);
         if(!Number.isFinite(startIndex)||startIndex<=0)break;
