@@ -126,18 +126,6 @@ async function loadBudgetTargetsFromApi(){
 async function saveBudgetTargetsToApi(payload){
   return postMetaApi({action:"save_budget_targets",budgetTargets:payload||{}});
 }
-async function importCacheToApi(cachePayload){
-  return postMetaApi({action:"import_cache",cache:cachePayload||{}});
-}
-async function startChunkedImportToApi(metaPayload){
-  return postMetaApi({action:"import_cache_start",meta:metaPayload||{}});
-}
-async function appendChunkedImportToApi(rows){
-  return postMetaApi({action:"import_cache_append",rows:Array.isArray(rows)?rows:[]});
-}
-async function finalizeChunkedImportToApi(){
-  return postMetaApi({action:"import_cache_finalize"});
-}
 
 function applyIdentifiers(rows,identifiers){
   return rows.map(r=>{
@@ -182,6 +170,18 @@ function parseCSV(text){
     if(!adset&&!adsetId)return null;
     return{adset,adsetId,division:iDiv>=0?cols[iDiv]:"Retail",lob:iLob>=0?cols[iLob]:"Desktop",segment:iSeg>=0?cols[iSeg]:"Productivity",objective:iObj>=0?cols[iObj]:"Inquiry"};
   }).filter(Boolean);
+}
+
+function toMonthRange(monthLabel){
+  if(MONTH_RANGES[monthLabel])return MONTH_RANGES[monthLabel];
+  const [yearText,monthName]=String(monthLabel||"").split(" ");
+  const year=Number(yearText);
+  const monthIndex=MONTH_IDX[monthName];
+  if(!Number.isFinite(year)||monthIndex==null)return null;
+  const start=new Date(Date.UTC(year,monthIndex,1));
+  const end=new Date(Date.UTC(year,monthIndex+1,0));
+  const fmt=d=>`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+  return {since:fmt(start),until:fmt(end)};
 }
 
 // CSS
@@ -951,7 +951,7 @@ function Breakdown({data}){
 }
 
 // Data
-function DataView({data,fetchMeta,syncStatus,onFacebookLogin,loginBusy,appId,tokenStatus}){
+function DataView({data,fetchMeta,syncStatus,tokenStatus}){
   const rows=useMemo(()=>[...data].sort((a,b)=>String(b.day||"").localeCompare(String(a.day||""))),[data]);
   const [tablePage,setTablePage]=useState(1);
   const [rowsPerPage,setRowsPerPage]=useState(200);
@@ -983,25 +983,12 @@ function DataView({data,fetchMeta,syncStatus,onFacebookLogin,loginBusy,appId,tok
   ];
   return(<div>
     <div className="card" style={{marginBottom:14}}>
-      <div className="card-hdr" style={{marginBottom:0}}>
-        <div className="card-ttl">Meta Login</div>
-        {tokenStatus==="valid"?(
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <div style={{fontSize:12,color:"#16A34A",fontWeight:600}}>Facebook connected</div>
-            <button className="btn" onClick={onFacebookLogin} disabled={loginBusy} style={{padding:"4px 10px",fontSize:12,display:"flex",alignItems:"center",gap:6}}>
-              {loginBusy&&<span className="spin"/>}
-              {loginBusy?"Opening...":"Reconnect"}
-            </button>
-          </div>
-        ):(
-          <button className="btn btn-p" onClick={onFacebookLogin} disabled={loginBusy} style={{display:"flex",alignItems:"center",gap:6}}>
-            {loginBusy&&<span className="spin"/>}
-            {loginBusy?"Opening Facebook…":"Login with Facebook"}
-          </button>
-        )}
-      </div>
+      <div className="card-hdr" style={{marginBottom:0}}><div className="card-ttl">Meta Connection</div></div>
       <div style={{fontSize:12,color:"#64748B",marginTop:8}}>
-        {appId?`Using App ID ${appId}`:"Set META_APP_ID in Netlify environment variables, then click Login with Facebook."}
+        API credentials are loaded from Netlify environment variables.
+      </div>
+      <div style={{fontSize:12,color:tokenStatus==="valid"?"#16A34A":tokenStatus==="invalid"?"#DC2626":"#64748B",marginTop:6,fontWeight:600}}>
+        {tokenStatus==="valid"?"Token verified":tokenStatus==="invalid"?"Token invalid":"Token status unknown"}
       </div>
     </div>
     {syncStatus?.inProgress&&(
@@ -1499,7 +1486,10 @@ export default function App(){
   const [discoveredAccounts,setDiscoveredAccounts]=useState([]);
   const [tokenStatus,setTokenStatus]=useState(null);
   const [businessName,setBusinessName]=useState(null);
-  const [loginBusy,setLoginBusy]=useState(false);
+  const [fetchRangeMode,setFetchRangeMode]=useState("incremental");
+  const [fetchMonth,setFetchMonth]=useState(()=>saved?.defaultMonth||"2026 MARCH");
+  const [fetchSince,setFetchSince]=useState("");
+  const [fetchUntil,setFetchUntil]=useState("");
   const [configUnlocked,setConfigUnlocked]=useState(loadConfigUnlocked);
   const [passwordInput,setPasswordInput]=useState("");
   const [passwordError,setPasswordError]=useState("");
@@ -1508,7 +1498,6 @@ export default function App(){
   const [orgAuthError,setOrgAuthError]=useState("");
   const [orgAccount,setOrgAccount]=useState(null);
   const [toast,setToast]=useState(null);
-  const importCacheInputRef=useRef(null);
   const showToast=(msg,isErr=false)=>{setToast({msg,isErr});setTimeout(()=>setToast(null),3500);};
   const protectedPage=!configUnlocked&&["settings","budget","mapping","data"].includes(page);
   const allowedOrgEmails=useMemo(()=>new Set(AAD_ALLOWED_EMAILS),[]);
@@ -1686,60 +1675,6 @@ export default function App(){
     await saveBudgetTargetsToApi(payload);
   },[]);
 
-  const loginWithFacebook=useCallback(async()=>{
-    if(!settings.appId?.trim()){
-      showToast("Set META_APP_ID in Netlify environment variables first",true);
-      return;
-    }
-    const redirectUri=`${window.location.origin}${window.location.pathname}`;
-    const state=Math.random().toString(36).slice(2);
-    const params=new URLSearchParams({
-      client_id:settings.appId.trim(),
-      redirect_uri:redirectUri,
-      response_type:"token",
-      scope:"ads_read,ads_management,business_management",
-      state,
-    });
-    const authUrl=`https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`;
-    const popup=window.open(authUrl,"fb_login","width=540,height=720");
-    if(!popup){showToast("Popup blocked. Allow popups then try again.",true);return;}
-    setLoginBusy(true);
-    const start=Date.now();
-    const poll=window.setInterval(async()=>{
-      if(popup.closed){
-        window.clearInterval(poll);
-        setLoginBusy(false);
-        return;
-      }
-      if(Date.now()-start>180000){
-        popup.close();
-        window.clearInterval(poll);
-        setLoginBusy(false);
-        showToast("Facebook login timed out. Try again.",true);
-        return;
-      }
-      try{
-        const href=popup.location.href;
-        const hash=popup.location.hash||"";
-        if(!href.startsWith(redirectUri)||!hash.includes("access_token="))return;
-        const parsed=new URLSearchParams(hash.replace(/^#/,""));
-        const token=parsed.get("access_token")||"";
-        popup.close();
-        window.clearInterval(poll);
-        setLoginBusy(false);
-        if(!token){showToast("Login completed but token was not returned.",true);return;}
-        const next={...settings,accessToken:"",appSecret:""};
-        setSettings(next);
-        saveLS({...next,identifiers});
-        await persistServerSettings("",next.businessAccountId||"",next.appId||"","",next.mappingOptions||DEFAULT_MAPPING_OPTIONS);
-        setTokenStatus("valid");
-        showToast("Facebook login succeeded ✓");
-      }catch{
-        // Ignore cross-origin reads until popup returns to redirect URI.
-      }
-    },450);
-  },[settings,identifiers,persistServerSettings]);
-
   const clearCache=useCallback(async()=>{
     const step1=window.confirm("Step 1/2: This will clear all cached Meta data. Continue?");
     if(!step1)return;
@@ -1762,43 +1697,30 @@ export default function App(){
     }finally{setLoading(false);}
   },[]);
 
-  const importCacheFile=useCallback(async(file)=>{
-    if(!file)return;
-    setLoading(true);
-    try{
-      const text=await file.text();
-      const parsed=JSON.parse(text);
-      const allRows=Array.isArray(parsed?.rows)?parsed.rows:(Array.isArray(parsed?.data)?parsed.data:[]);
-      const sizeBytes=file.size||new Blob([text]).size;
-      const shouldChunk=sizeBytes>4_500_000||allRows.length>4000;
-      let r;
-      if(!shouldChunk){
-        r=await importCacheToApi(parsed);
-      }else{
-        const metaPayload={...(parsed&&typeof parsed==="object"?parsed:{})};
-        delete metaPayload.rows;
-        delete metaPayload.data;
-        await startChunkedImportToApi(metaPayload);
-        const chunkSize=1000;
-        for(let i=0;i<allRows.length;i+=chunkSize){
-          const chunk=allRows.slice(i,i+chunkSize);
-          await appendChunkedImportToApi(chunk);
-        }
-        r=await finalizeChunkedImportToApi();
-      }
-      setRawData(r.data||[]);
-      setFetchMeta(r.meta||null);
-      setSyncStatus(null);
-      setApiErrors([]);
-      setDiscoveredAccounts(r.meta?.discoveredAccounts||[]);
-      if(Array.isArray(r.meta?.businessNames)&&r.meta.businessNames.length)setBusinessName(r.meta.businessNames.join(", "));else setBusinessName(null);
-      showToast(`Cache JSON imported (${(r.data||[]).length.toLocaleString()} rows) ✓`);
-    }catch(e){
-      showToast(`Failed to import JSON: ${e.message||"Invalid file"}`,true);
-    }finally{setLoading(false);}
-  },[]);
-
   const fetchData=useCallback(async()=>{
+    let selectedSince=null;
+    let selectedUntil=null;
+    if(fetchRangeMode==="month"){
+      const range=toMonthRange(fetchMonth);
+      if(!range){
+        showToast("Please select a valid month.",true);
+        return;
+      }
+      selectedSince=range.since;
+      selectedUntil=range.until;
+    }else if(fetchRangeMode==="custom"){
+      if(!fetchSince||!fetchUntil){
+        showToast("Please set both start and end dates.",true);
+        return;
+      }
+      if(fetchSince>fetchUntil){
+        showToast("Start date must be on or before end date.",true);
+        return;
+      }
+      selectedSince=fetchSince;
+      selectedUntil=fetchUntil;
+    }
+
     setLoading(true);setApiErrors([]);
     setSyncStatus({inProgress:true,message:"Starting sync…",totalAccounts:0,completedAccounts:0,currentAccountIndex:0,currentAccountId:null,startedAt:new Date().toISOString()});
     let pollId=null;
@@ -1812,7 +1734,7 @@ export default function App(){
       let batchUntil=null;
       let r=null;
       for(let i=0;i<100;i++){
-        r=await fetchLiveData(settings.accessToken,settings.businessAccountId,startIndex,batchSince,batchUntil);
+        r=await fetchLiveData(settings.accessToken,settings.businessAccountId,startIndex,batchSince||selectedSince,batchUntil||selectedUntil);
         if(!batchSince&&r?.meta?.syncSince)batchSince=r.meta.syncSince;
         if(!batchUntil&&r?.meta?.syncUntil)batchUntil=r.meta.syncUntil;
         if(!r?.meta?.partial)break;
@@ -1857,7 +1779,7 @@ export default function App(){
       try{const p=await loadSyncStatusFromApi();if(p.status)setSyncStatus(p.status);}catch{}
       setLoading(false);
     }
-  },[settings.businessAccountId]);
+  },[fetchMonth,fetchRangeMode,fetchSince,fetchUntil,settings.businessAccountId]);
 
   useEffect(()=>{
     if(!orgAccount)return;
@@ -1933,15 +1855,21 @@ export default function App(){
           <div><div className="pg-title">{PT[page]}</div><div className="pg-sub">EasyPC Marketing Analytics{page==="data"?"":" · "+month}</div></div>
           {page==="data"?(
             <div className="topbar-r">
+              <select value={fetchRangeMode} onChange={e=>setFetchRangeMode(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}}>
+                <option value="incremental">Incremental (recommended)</option>
+                <option value="month">By month</option>
+                <option value="custom">Custom date range</option>
+              </select>
+              {fetchRangeMode==="month"&&(
+                <select value={fetchMonth} onChange={e=>setFetchMonth(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}}>{MONTH_OPTIONS.map(m=><option key={m}>{m}</option>)}</select>
+              )}
+              {fetchRangeMode==="custom"&&(
+                <>
+                  <input type="date" value={fetchSince} onChange={e=>setFetchSince(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}} />
+                  <input type="date" value={fetchUntil} onChange={e=>setFetchUntil(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}} />
+                </>
+              )}
               <button className="btn btn-p" onClick={fetchData} disabled={loading||protectedPage} style={{display:"flex",alignItems:"center",gap:5}}>{loading&&<span className="spin"/>}{loading?"Fetching…":"Fetch Data from Meta API"}</button>
-              <button className="btn" onClick={()=>importCacheInputRef.current?.click()} disabled={loading||protectedPage}>Upload Cache JSON</button>
-              <input
-                ref={importCacheInputRef}
-                type="file"
-                accept="application/json,.json"
-                style={{display:"none"}}
-                onChange={async e=>{const f=e.target.files?.[0];if(f)await importCacheFile(f);e.target.value="";}}
-              />
               <button className="btn" onClick={clearCache} disabled={loading||protectedPage}>Clear Cache</button>
             </div>
           ):["overview","breakdown","desktop","lts","lsa"].includes(page)&&(
@@ -1963,7 +1891,7 @@ export default function App(){
             {page==="settings"  &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><Settings settings={settings} setSettings={setSettings} identifiers={identifiers} toast={showToast} persistServerSettings={persistServerSettings}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
             {page==="budget"    &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><BudgetTargets settings={settings} setSettings={setSettings} identifiers={identifiers} toast={showToast} persistBudgetTargets={persistBudgetTargets}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
             {page==="mapping"   &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><Mapping settings={settings} setSettings={setSettings} identifiers={identifiers} setIdentifiers={setIdentifiers} toast={showToast} rawData={rawData} persistMappings={persistMappings}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
-            {page==="data"      &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><DataView data={rawData} fetchMeta={fetchMeta} syncStatus={syncStatus} onFacebookLogin={loginWithFacebook} loginBusy={loginBusy} appId={settings.appId} tokenStatus={tokenStatus}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
+            {page==="data"      &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><DataView data={rawData} fetchMeta={fetchMeta} syncStatus={syncStatus} tokenStatus={tokenStatus}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
           </div>)}
         </div>
       </div>
