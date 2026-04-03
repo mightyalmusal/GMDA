@@ -93,8 +93,8 @@ async function postMetaApi(payload){
   return res.json().catch(()=>({}));
 }
 
-async function fetchLiveData(accessToken,businessAccountId){
-  return postMetaApi({accessToken,businessAccountId:businessAccountId||undefined});
+async function fetchLiveData(accessToken,businessAccountId,startIndex=0){
+  return postMetaApi({accessToken,businessAccountId:businessAccountId||undefined,startIndex});
 }
 async function loadCachedFromApi(){
   return postMetaApi({action:"load"});
@@ -1755,7 +1755,14 @@ export default function App(){
     };
     pollId=setInterval(poll,1200);
     try{
-      const r=await fetchLiveData(settings.accessToken,settings.businessAccountId);
+      let startIndex=0;
+      let r=null;
+      for(let i=0;i<100;i++){
+        r=await fetchLiveData(settings.accessToken,settings.businessAccountId,startIndex);
+        if(!r?.meta?.partial)break;
+        startIndex=Number(r.meta.nextAccountIndex||0);
+        if(!Number.isFinite(startIndex)||startIndex<=0)break;
+      }
       setRawData(r.data||[]);
       if(r.meta){
         const effectiveErrors=r.meta.syncedNow===false?[]:(r.meta.errors||[]);
@@ -1774,7 +1781,7 @@ export default function App(){
           setApiErrors(effectiveErrors);
           if(hasTokenError)showToast("Access token is expired/invalid. Update META_ACCESS_TOKEN in Netlify environment variables.",true);
           else showToast(`Fetched with ${effectiveErrors.length} error(s)`,true);
-        }else if(r.meta?.syncedNow===false){
+        }else if(r.meta?.syncedNow===false&&!r.meta?.partial){
           setApiErrors([]);
           showToast("No missing dates. Cache is already up to date ✓");
         }else{

@@ -30,6 +30,7 @@ const SUPABASE_TABLE = String(process.env.SUPABASE_TABLE || "app_state").trim();
 const META_ACCESS_TOKEN_ENV = String(process.env.META_ACCESS_TOKEN || "").trim();
 const META_APP_ID_ENV = String(process.env.META_APP_ID || "").trim();
 const META_APP_SECRET_ENV = String(process.env.META_APP_SECRET || "").trim();
+const MAX_ACCOUNTS_PER_SYNC = Math.max(1, Number(process.env.MAX_ACCOUNTS_PER_SYNC || 2));
   const SP_STORAGE_ENABLED = String(process.env.SP_STORAGE_ENABLED || "").trim().toLowerCase() === "true";
   const SP_TENANT_ID = String(process.env.SP_TENANT_ID || AAD_TENANT_ID || "").trim();
   const SP_CLIENT_ID = String(process.env.SP_CLIENT_ID || "").trim();
@@ -940,6 +941,8 @@ exports.handler = async function (event) {
 
   const { accessToken, datePreset, since, until, action } = body;
   const businessIds = parseBusinessIds(body.businessAccountId);
+  const startIndexRaw = Number(body.startIndex || 0);
+  const startIndex = Number.isFinite(startIndexRaw) && startIndexRaw > 0 ? Math.floor(startIndexRaw) : 0;
 
   if (action === "load") {
     try {
@@ -1146,22 +1149,23 @@ exports.handler = async function (event) {
 
     const startedAt = new Date().toISOString();
     const accountStatuses = adAccountIds.map(id => ({ accountId: id, status: "pending", rows: 0, error: null }));
+    const endExclusive = Math.min(adAccountIds.length, startIndex + MAX_ACCOUNTS_PER_SYNC);
     await saveStatus({
       inProgress: true,
       startedAt,
       totalAccounts: adAccountIds.length,
-      completedAccounts: 0,
-      currentAccountId: adAccountIds[0],
-      currentAccountIndex: 1,
+      completedAccounts: startIndex,
+      currentAccountId: adAccountIds[startIndex] || null,
+      currentAccountIndex: startIndex + 1,
       syncSince,
       syncUntil,
       accounts: accountStatuses,
-      message: "Starting sync",
+      message: `Starting sync batch (${startIndex + 1}-${endExclusive} of ${adAccountIds.length})`,
     });
 
     const fetchedRows = [];
     const errors = [];
-    for (let i = 0; i < adAccountIds.length; i++) {
+    for (let i = startIndex; i < endExclusive; i++) {
       const id = adAccountIds[i];
       await saveStatus({
         inProgress: true,
@@ -1200,6 +1204,8 @@ exports.handler = async function (event) {
       });
     }
 
+    const partial = endExclusive < adAccountIds.length;
+
     const merged = mergeRows(cache.rows, fetchedRows);
     const fetchedAt = new Date().toISOString();
     const nextCacheLastDate = latestDate(merged);
@@ -1217,7 +1223,9 @@ exports.handler = async function (event) {
       cacheLastDate: nextCacheLastDate,
       syncSince,
       syncUntil,
-      syncedNow: true,
+      syncedNow: !partial,
+      partial,
+      nextAccountIndex: partial ? endExclusive : null,
       fromCache: false,
     };
 
@@ -1234,17 +1242,17 @@ exports.handler = async function (event) {
     });
 
     await saveStatus({
-      inProgress: false,
+      inProgress: partial,
       startedAt,
       finishedAt: new Date().toISOString(),
       totalAccounts: adAccountIds.length,
-      completedAccounts: adAccountIds.length,
-      currentAccountId: null,
-      currentAccountIndex: adAccountIds.length,
+      completedAccounts: endExclusive,
+      currentAccountId: partial ? adAccountIds[endExclusive] || null : null,
+      currentAccountIndex: endExclusive,
       syncSince,
       syncUntil,
       accounts: accountStatuses,
-      message: "Sync complete",
+      message: partial ? `Batch complete (${endExclusive}/${adAccountIds.length})` : "Sync complete",
     });
 
     return { statusCode: 200, headers, body: JSON.stringify({ data: merged, meta }) };
