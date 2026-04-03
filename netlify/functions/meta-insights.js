@@ -575,6 +575,25 @@ function normalizeBudgetTargets(payload) {
   };
 }
 
+function normalizeImportedCache(input) {
+  const parsed = input && typeof input === "object" ? input : {};
+  const rows = Array.isArray(parsed.rows) ? parsed.rows : (Array.isArray(parsed.data) ? parsed.data : []);
+  const safeRows = rows.filter(r => r && typeof r === "object");
+  const cacheLastDate = parsed.cacheLastDate || latestDate(safeRows);
+  return {
+    rows: safeRows,
+    fetchedAt: parsed.fetchedAt || new Date().toISOString(),
+    since: parsed.since || (safeRows.length ? safeRows.reduce((m, r) => (!m || String(r.day || "") < m ? String(r.day || "") : m), null) : null),
+    until: parsed.until || cacheLastDate || null,
+    accountsQueried: Number(parsed.accountsQueried || 0),
+    accountsSucceeded: Number(parsed.accountsSucceeded || 0),
+    errors: Array.isArray(parsed.errors) ? parsed.errors : [],
+    businessNames: Array.isArray(parsed.businessNames) ? parsed.businessNames : [],
+    discoveredAccounts: Array.isArray(parsed.discoveredAccounts) ? parsed.discoveredAccounts : [],
+    cacheLastDate,
+  };
+}
+
 async function loadBudgetTargetsFile() {
   try {
     const raw = await readStorageText(BUDGET_TARGETS_FILE, "meta-budget-targets.json");
@@ -1022,6 +1041,48 @@ exports.handler = async function (event) {
       };
     } catch (err) {
       return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    }
+  }
+
+  if (action === "import_cache") {
+    try {
+      const imported = normalizeImportedCache(body.cache || {});
+      await saveCache(imported.rows, {
+        fetchedAt: imported.fetchedAt,
+        since: imported.since,
+        until: imported.until,
+        accountsQueried: imported.accountsQueried,
+        accountsSucceeded: imported.accountsSucceeded,
+        errors: imported.errors,
+        businessNames: imported.businessNames,
+        discoveredAccounts: imported.discoveredAccounts,
+        cacheLastDate: imported.cacheLastDate,
+      });
+      await clearStatus();
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          ok: true,
+          data: imported.rows,
+          meta: {
+            totalRows: imported.rows.length,
+            fetchedAt: imported.fetchedAt,
+            since: imported.since,
+            until: imported.until,
+            accountsQueried: imported.accountsQueried,
+            accountsSucceeded: imported.accountsSucceeded,
+            discoveredAccounts: imported.discoveredAccounts,
+            errors: imported.errors,
+            businessNames: imported.businessNames,
+            cacheLastDate: imported.cacheLastDate,
+            fromCache: true,
+            imported: true,
+          },
+        }),
+      };
+    } catch (err) {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: `Failed to import cache JSON: ${err.message}` }) };
     }
   }
 

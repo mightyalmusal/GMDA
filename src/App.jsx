@@ -126,6 +126,9 @@ async function loadBudgetTargetsFromApi(){
 async function saveBudgetTargetsToApi(payload){
   return postMetaApi({action:"save_budget_targets",budgetTargets:payload||{}});
 }
+async function importCacheToApi(cachePayload){
+  return postMetaApi({action:"import_cache",cache:cachePayload||{}});
+}
 
 function applyIdentifiers(rows,identifiers){
   return rows.map(r=>{
@@ -1496,6 +1499,7 @@ export default function App(){
   const [orgAuthError,setOrgAuthError]=useState("");
   const [orgAccount,setOrgAccount]=useState(null);
   const [toast,setToast]=useState(null);
+  const importCacheInputRef=useRef(null);
   const showToast=(msg,isErr=false)=>{setToast({msg,isErr});setTimeout(()=>setToast(null),3500);};
   const protectedPage=!configUnlocked&&["settings","budget","mapping","data"].includes(page);
   const allowedOrgEmails=useMemo(()=>new Set(AAD_ALLOWED_EMAILS),[]);
@@ -1749,6 +1753,25 @@ export default function App(){
     }finally{setLoading(false);}
   },[]);
 
+  const importCacheFile=useCallback(async(file)=>{
+    if(!file)return;
+    setLoading(true);
+    try{
+      const text=await file.text();
+      const parsed=JSON.parse(text);
+      const r=await importCacheToApi(parsed);
+      setRawData(r.data||[]);
+      setFetchMeta(r.meta||null);
+      setSyncStatus(null);
+      setApiErrors([]);
+      setDiscoveredAccounts(r.meta?.discoveredAccounts||[]);
+      if(Array.isArray(r.meta?.businessNames)&&r.meta.businessNames.length)setBusinessName(r.meta.businessNames.join(", "));else setBusinessName(null);
+      showToast(`Cache JSON imported (${(r.data||[]).length.toLocaleString()} rows) ✓`);
+    }catch(e){
+      showToast(`Failed to import JSON: ${e.message||"Invalid file"}`,true);
+    }finally{setLoading(false);}
+  },[]);
+
   const fetchData=useCallback(async()=>{
     setLoading(true);setApiErrors([]);
     setSyncStatus({inProgress:true,message:"Starting sync…",totalAccounts:0,completedAccounts:0,currentAccountIndex:0,currentAccountId:null,startedAt:new Date().toISOString()});
@@ -1885,6 +1908,14 @@ export default function App(){
           {page==="data"?(
             <div className="topbar-r">
               <button className="btn btn-p" onClick={fetchData} disabled={loading||protectedPage} style={{display:"flex",alignItems:"center",gap:5}}>{loading&&<span className="spin"/>}{loading?"Fetching…":"Fetch Data from Meta API"}</button>
+              <button className="btn" onClick={()=>importCacheInputRef.current?.click()} disabled={loading||protectedPage}>Upload Cache JSON</button>
+              <input
+                ref={importCacheInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{display:"none"}}
+                onChange={async e=>{const f=e.target.files?.[0];if(f)await importCacheFile(f);e.target.value="";}}
+              />
               <button className="btn" onClick={clearCache} disabled={loading||protectedPage}>Clear Cache</button>
             </div>
           ):["overview","breakdown","desktop","lts","lsa"].includes(page)&&(
