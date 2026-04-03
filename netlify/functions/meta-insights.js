@@ -866,6 +866,18 @@ function formatMetaError(errorObj, adAccountId) {
 }
 
 async function fetchInsightsWithRetry(adAccountId, datePreset, since, until, accessToken, maxRetries = 3) {
+  if (since && until && daysBetweenISO(since, until) > 31) {
+    const rows = [];
+    let cursor = since;
+    while (compareISO(cursor, until) <= 0) {
+      const chunkEnd = compareISO(addDaysISO(cursor, 30), until) < 0 ? addDaysISO(cursor, 30) : until;
+      const part = await fetchInsightsWithRetry(adAccountId, datePreset, cursor, chunkEnd, accessToken, Math.min(maxRetries, 2));
+      rows.push(...part);
+      cursor = addDaysISO(chunkEnd, 1);
+    }
+    return rows;
+  }
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fetchInsightsForAccount(adAccountId, datePreset, since, until, accessToken);
