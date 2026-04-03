@@ -71,55 +71,57 @@ function apiHeaders(){const headers={"Content-Type":"application/json"};if(API_B
 // Demo mode removed
 const MOCK_RAW=[];
 
+async function parseApiErrorResponse(res){
+  const raw=await res.text().catch(()=>"");
+  let detail="";
+  try{
+    const json=JSON.parse(raw||"{}");
+    detail=json.error||json.message||"";
+  }catch{
+    detail=raw||"";
+  }
+  const head=`HTTP ${res.status}${res.statusText?` ${res.statusText}`:""}`;
+  return detail?`${head} - ${detail}`:head;
+}
+
+async function postMetaApi(payload){
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify(payload||{})});
+  if(!res.ok){
+    const message=await parseApiErrorResponse(res);
+    throw new Error(message||"API request failed");
+  }
+  return res.json().catch(()=>({}));
+}
+
 async function fetchLiveData(accessToken,businessAccountId){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({accessToken,businessAccountId:businessAccountId||undefined})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({accessToken,businessAccountId:businessAccountId||undefined});
 }
 async function loadCachedFromApi(){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"load"});
 }
 async function clearCacheFromApi(){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"clear"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"clear"});
 }
 async function loadSyncStatusFromApi(){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"status"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"status"});
 }
 async function loadSettingsFromApi(){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load_settings"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"load_settings"});
 }
 async function saveSettingsToApi(accessToken,businessAccountId,appId,appSecret,mappingOptions){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_settings",businessAccountId:businessAccountId||"",mappingOptions:mappingOptions||DEFAULT_MAPPING_OPTIONS})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"save_settings",businessAccountId:businessAccountId||"",mappingOptions:mappingOptions||DEFAULT_MAPPING_OPTIONS});
 }
 async function loadMappingsFromApi(){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load_mappings"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"load_mappings"});
 }
 async function saveMappingsToApi(identifiers){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_mappings",identifiers:Array.isArray(identifiers)?identifiers:[]})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"save_mappings",identifiers:Array.isArray(identifiers)?identifiers:[]});
 }
 async function loadBudgetTargetsFromApi(){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load_budget_targets"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"load_budget_targets"});
 }
 async function saveBudgetTargetsToApi(payload){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_budget_targets",budgetTargets:payload||{}})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
-  return res.json();
+  return postMetaApi({action:"save_budget_targets",budgetTargets:payload||{}});
 }
 
 function applyIdentifiers(rows,identifiers){
