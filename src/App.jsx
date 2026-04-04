@@ -93,10 +93,11 @@ async function postMetaApi(payload){
   return res.json().catch(()=>({}));
 }
 
-async function fetchLiveData(accessToken,businessAccountId,startIndex=0,since=null,until=null){
+async function fetchLiveData(accessToken,businessAccountId,startIndex=0,since=null,until=null,forceRange=false){
   const payload={accessToken,businessAccountId:businessAccountId||undefined,startIndex};
   if(since)payload.since=since;
   if(until)payload.until=until;
+  if(forceRange)payload.forceRange=true;
   return postMetaApi(payload);
 }
 async function loadCachedFromApi(){
@@ -182,6 +183,25 @@ function toMonthRange(monthLabel){
   const end=new Date(Date.UTC(year,monthIndex+1,0));
   const fmt=d=>`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
   return {since:fmt(start),until:fmt(end)};
+}
+
+function addDaysIso(isoDate,days){
+  const d=new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate()+days);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+}
+
+function splitRangeIntoWindows(since,until,windowDays=7){
+  if(!since||!until)return[];
+  const windows=[];
+  let cursor=since;
+  while(cursor<=until){
+    const end=addDaysIso(cursor,windowDays-1);
+    const clampedEnd=end<until?end:until;
+    windows.push({since:cursor,until:clampedEnd});
+    cursor=addDaysIso(clampedEnd,1);
+  }
+  return windows;
 }
 
 // CSS
@@ -1700,6 +1720,7 @@ export default function App(){
   const fetchData=useCallback(async()=>{
     let selectedSince=null;
     let selectedUntil=null;
+    let forceRange=false;
     if(fetchRangeMode==="month"){
       const range=toMonthRange(fetchMonth);
       if(!range){
@@ -1708,6 +1729,7 @@ export default function App(){
       }
       selectedSince=range.since;
       selectedUntil=range.until;
+      forceRange=true;
     }else if(fetchRangeMode==="custom"){
       if(!fetchSince||!fetchUntil){
         showToast("Please set both start and end dates.",true);
@@ -1719,7 +1741,12 @@ export default function App(){
       }
       selectedSince=fetchSince;
       selectedUntil=fetchUntil;
+      forceRange=true;
     }
+
+    const fetchWindows=(forceRange&&selectedSince&&selectedUntil)
+      ?splitRangeIntoWindows(selectedSince,selectedUntil,7)
+      :[{since:null,until:null}];
 
     setLoading(true);setApiErrors([]);
     setSyncStatus({inProgress:true,message:"Starting sync…",totalAccounts:0,completedAccounts:0,currentAccountIndex:0,currentAccountId:null,startedAt:new Date().toISOString()});
@@ -1729,17 +1756,26 @@ export default function App(){
     };
     pollId=setInterval(poll,1200);
     try{
-      let startIndex=0;
-      let batchSince=null;
-      let batchUntil=null;
       let r=null;
-      for(let i=0;i<100;i++){
-        r=await fetchLiveData(settings.accessToken,settings.businessAccountId,startIndex,batchSince||selectedSince,batchUntil||selectedUntil);
-        if(!batchSince&&r?.meta?.syncSince)batchSince=r.meta.syncSince;
-        if(!batchUntil&&r?.meta?.syncUntil)batchUntil=r.meta.syncUntil;
-        if(!r?.meta?.partial)break;
-        startIndex=Number(r.meta.nextAccountIndex||0);
-        if(!Number.isFinite(startIndex)||startIndex<=0)break;
+      for(const win of fetchWindows){
+        let startIndex=0;
+        let batchSince=null;
+        let batchUntil=null;
+        for(let i=0;i<100;i++){
+          r=await fetchLiveData(
+            settings.accessToken,
+            settings.businessAccountId,
+            startIndex,
+            batchSince||win.since,
+            batchUntil||win.until,
+            forceRange
+          );
+          if(!batchSince&&r?.meta?.syncSince)batchSince=r.meta.syncSince;
+          if(!batchUntil&&r?.meta?.syncUntil)batchUntil=r.meta.syncUntil;
+          if(!r?.meta?.partial)break;
+          startIndex=Number(r.meta.nextAccountIndex||0);
+          if(!Number.isFinite(startIndex)||startIndex<=0)break;
+        }
       }
       setRawData(r.data||[]);
       if(r.meta){
