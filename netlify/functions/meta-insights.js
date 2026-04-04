@@ -14,7 +14,6 @@ const BUDGET_TARGETS_FILE = path.join(CACHE_DIR, "meta-budget-targets.json");
 // Legacy cache location used by earlier builds; retained for one-time migration.
 const LEGACY_CACHE_FILE = path.join(process.cwd(), ".cache", "meta-insights-cache.json");
 const STATUS_FILE = path.join(CACHE_DIR, "meta-insights-status.json");
-const IMPORT_BUFFER_FILE = path.join(CACHE_DIR, "meta-insights-import-buffer.json");
 const SETTINGS_FILE = path.join(process.cwd(), "settings.ini");
 const AAD_TENANT_ID = (process.env.AAD_TENANT_ID || "973ec11f-980d-4bd7-9443-fe528f0a752b").trim();
 const AAD_CLIENT_ID = (process.env.AAD_CLIENT_ID || "e7c8038f-4c5a-4be8-bce1-a3d42e0e38f5").trim();
@@ -25,22 +24,6 @@ const ALLOWED_EMAILS = new Set(
     .map(v => v.trim().toLowerCase())
     .filter(Boolean)
 );
-const SUPABASE_URL = String(process.env.SUPABASE_URL || "").trim().replace(/\/$/, "");
-const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
-const SUPABASE_TABLE = String(process.env.SUPABASE_TABLE || "app_state").trim();
-const META_ACCESS_TOKEN_ENV = String(process.env.META_ACCESS_TOKEN || "").trim();
-const META_APP_ID_ENV = String(process.env.META_APP_ID || "").trim();
-const META_APP_SECRET_ENV = String(process.env.META_APP_SECRET || "").trim();
-const MAX_ACCOUNTS_PER_SYNC = Math.max(1, Number(process.env.MAX_ACCOUNTS_PER_SYNC || 2));
-const MAX_DAYS_PER_META_REQUEST = Math.max(1, Number(process.env.MAX_DAYS_PER_META_REQUEST || 7));
-  const SP_STORAGE_ENABLED = String(process.env.SP_STORAGE_ENABLED || "").trim().toLowerCase() === "true";
-  const SP_TENANT_ID = String(process.env.SP_TENANT_ID || AAD_TENANT_ID || "").trim();
-  const SP_CLIENT_ID = String(process.env.SP_CLIENT_ID || "").trim();
-  const SP_CLIENT_SECRET = String(process.env.SP_CLIENT_SECRET || "").trim();
-  const SP_SITE_HOSTNAME = String(process.env.SP_SITE_HOSTNAME || "").trim();
-  const SP_SITE_PATH = String(process.env.SP_SITE_PATH || "").trim();
-  const SP_DOC_LIBRARY = String(process.env.SP_DOC_LIBRARY || "Documents").trim();
-  const SP_FOLDER = String(process.env.SP_FOLDER || "MarketingHubData").trim();
 const DEFAULT_MAPPING_OPTIONS = {
   divisions: ["Retail", "Ecomm", "HR", "LSA", "Desktop", "LTS"],
   lobs: ["Desktop", "LTS", "LSA", "Brand Value", "Housebrand", "Lazada"],
@@ -68,7 +51,6 @@ const DEFAULT_MAPPING_OPTIONS = {
 
 const INSIGHTS_FIELDS = [
   "campaign_name",
-  "adset_id",
   "adset_name",
   "account_name",
   "account_currency",
@@ -88,215 +70,6 @@ const INSIGHTS_FIELDS = [
 
 let joseModPromise;
 let microsoftJwks;
-let graphAppTokenCache = { token: null, expiresAt: 0 };
-let sharePointSiteIdCache = null;
-let sharePointDriveIdCache = null;
-
-function isSharePointConfigured() {
-  return SP_STORAGE_ENABLED && !!SP_TENANT_ID && !!SP_CLIENT_ID && !!SP_CLIENT_SECRET && !!SP_SITE_HOSTNAME && !!SP_SITE_PATH;
-}
-
-function isSupabaseConfigured() {
-  return !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
-}
-
-function supabaseHeaders(extra = {}) {
-  return {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    "Content-Type": "application/json",
-    ...extra,
-  };
-}
-
-async function readSupabaseText(key) {
-  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?key=eq.${encodeURIComponent(key)}&select=value&limit=1`;
-  const res = await fetch(url, { headers: supabaseHeaders() });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to read Supabase key '${key}': ${text || res.statusText}`);
-  }
-  const rows = await res.json();
-  if (!Array.isArray(rows) || !rows.length) {
-    const err = new Error("Not found");
-    err.code = "ENOENT";
-    throw err;
-  }
-  return typeof rows[0].value === "string" ? rows[0].value : JSON.stringify(rows[0].value ?? null);
-}
-
-async function writeSupabaseText(key, content) {
-  const payload = [{ key, value: String(content || "") }];
-  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: supabaseHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to write Supabase key '${key}': ${text || res.statusText}`);
-  }
-}
-
-async function deleteSupabaseKey(key) {
-  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?key=eq.${encodeURIComponent(key)}`;
-  const res = await fetch(url, {
-    method: "DELETE",
-    headers: supabaseHeaders({ Prefer: "return=minimal" }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to delete Supabase key '${key}': ${text || res.statusText}`);
-  }
-}
-
-function encodeGraphPath(pathValue) {
-  return String(pathValue || "")
-    .split("/")
-    .filter(Boolean)
-    .map(seg => encodeURIComponent(seg))
-    .join("/");
-}
-
-async function graphFetch(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Graph request failed (${res.status}): ${text || res.statusText}`);
-  }
-  return res;
-}
-
-async function getGraphAppToken() {
-  if (graphAppTokenCache.token && Date.now() < graphAppTokenCache.expiresAt - 120000) {
-    return graphAppTokenCache.token;
-  }
-  const tokenUrl = `https://login.microsoftonline.com/${SP_TENANT_ID}/oauth2/v2.0/token`;
-  const body = new URLSearchParams({
-    client_id: SP_CLIENT_ID,
-    client_secret: SP_CLIENT_SECRET,
-    scope: "https://graph.microsoft.com/.default",
-    grant_type: "client_credentials",
-  });
-  const res = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to get SharePoint app token: ${text || res.statusText}`);
-  }
-  const json = await res.json();
-  graphAppTokenCache = {
-    token: json.access_token,
-    expiresAt: Date.now() + (Number(json.expires_in || 3600) * 1000),
-  };
-  return graphAppTokenCache.token;
-}
-
-async function getSharePointSiteId() {
-  if (sharePointSiteIdCache) return sharePointSiteIdCache;
-  const token = await getGraphAppToken();
-  const normalizedPath = SP_SITE_PATH.startsWith("/") ? SP_SITE_PATH : `/${SP_SITE_PATH}`;
-  const url = `https://graph.microsoft.com/v1.0/sites/${SP_SITE_HOSTNAME}:${normalizedPath}`;
-  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const json = await res.json();
-  sharePointSiteIdCache = json.id;
-  if (!sharePointSiteIdCache) throw new Error("Unable to resolve SharePoint site id");
-  return sharePointSiteIdCache;
-}
-
-async function getSharePointDriveId() {
-  if (sharePointDriveIdCache) return sharePointDriveIdCache;
-  const token = await getGraphAppToken();
-  const siteId = await getSharePointSiteId();
-  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`;
-  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const json = await res.json();
-  const drives = Array.isArray(json.value) ? json.value : [];
-  const drive = drives.find(d => String(d.name || "").toLowerCase() === SP_DOC_LIBRARY.toLowerCase()) || drives[0];
-  if (!drive?.id) throw new Error(`Unable to find SharePoint document library '${SP_DOC_LIBRARY}'`);
-  sharePointDriveIdCache = drive.id;
-  return sharePointDriveIdCache;
-}
-
-async function readStorageText(localPath, sharePointName) {
-  if (isSupabaseConfigured()) {
-    return readSupabaseText(sharePointName);
-  }
-  if (!isSharePointConfigured()) {
-    return fs.readFile(localPath, "utf8");
-  }
-  const token = await getGraphAppToken();
-  const driveId = await getSharePointDriveId();
-  const relPath = encodeGraphPath(`${SP_FOLDER}/${sharePointName}`);
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${relPath}:/content`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 404) {
-    const err = new Error("Not found");
-    err.code = "ENOENT";
-    throw err;
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to read SharePoint file '${sharePointName}': ${text || res.statusText}`);
-  }
-  return res.text();
-}
-
-async function writeStorageText(localPath, sharePointName, content) {
-  if (isSupabaseConfigured()) {
-    await writeSupabaseText(sharePointName, content);
-    return;
-  }
-  if (!isSharePointConfigured()) {
-    await fs.mkdir(path.dirname(localPath), { recursive: true });
-    await fs.writeFile(localPath, content, "utf8");
-    return;
-  }
-  const token = await getGraphAppToken();
-  const driveId = await getSharePointDriveId();
-  const relPath = encodeGraphPath(`${SP_FOLDER}/${sharePointName}`);
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${relPath}:/content`;
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: String(content || ""),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to write SharePoint file '${sharePointName}': ${text || res.statusText}`);
-  }
-}
-
-async function deleteStorageFile(localPath, sharePointName) {
-  if (isSupabaseConfigured()) {
-    await deleteSupabaseKey(sharePointName);
-    return;
-  }
-  if (!isSharePointConfigured()) {
-    try {
-      await fs.unlink(localPath);
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    return;
-  }
-  const token = await getGraphAppToken();
-  const driveId = await getSharePointDriveId();
-  const relPath = encodeGraphPath(`${SP_FOLDER}/${sharePointName}`);
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${relPath}`;
-  const res = await fetch(url, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-  if (![204, 404].includes(res.status)) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Failed to delete SharePoint file '${sharePointName}': ${text || res.statusText}`);
-  }
-}
 
 function getBearerToken(headers = {}) {
   const value = headers.authorization || headers.Authorization || "";
@@ -392,7 +165,7 @@ function latestDate(rows) {
 }
 
 function mergeRows(existingRows, newRows) {
-  const keyOf = r => `${r.account_id || ""}|${r.adset_id || r.adset_name || ""}|${r.day || ""}`;
+  const keyOf = r => `${r.account_id || ""}|${r.adset_name || ""}|${r.day || ""}`;
   const map = new Map(existingRows.map(r => [keyOf(r), r]));
   newRows.forEach(r => map.set(keyOf(r), r));
   return [...map.values()].sort((a, b) => (a.day || "").localeCompare(b.day || ""));
@@ -430,10 +203,6 @@ function parseIni(content) {
   return result;
 }
 
-function resolveMetaAccessToken(requestToken = "", settingsToken = "") {
-  return String(META_ACCESS_TOKEN_ENV || requestToken || settingsToken || "").trim();
-}
-
 function sanitizeOptionList(value, fallback = []) {
   if (!Array.isArray(value)) return [...fallback];
   const cleaned = [...new Set(value.map(v => String(v || "").trim()).filter(Boolean))];
@@ -451,7 +220,10 @@ function parseOptionList(raw, fallback = []) {
 }
 
 function serializeIni(values) {
+  const accessToken = String(values.accessToken || "").replace(/\r?\n/g, "").trim();
   const businessAccountId = String(values.businessAccountId || "").replace(/\r?\n/g, "").trim();
+  const appId = String(values.appId || "").replace(/\r?\n/g, "").trim();
+  const appSecret = String(values.appSecret || "").replace(/\r?\n/g, "").trim();
   const mappingOptions = values.mappingOptions || {};
   const divisions = JSON.stringify(sanitizeOptionList(mappingOptions.divisions, DEFAULT_MAPPING_OPTIONS.divisions));
   const lobs = JSON.stringify(sanitizeOptionList(mappingOptions.lobs, DEFAULT_MAPPING_OPTIONS.lobs));
@@ -459,7 +231,10 @@ function serializeIni(values) {
   const objectives = JSON.stringify(sanitizeOptionList(mappingOptions.objectives, DEFAULT_MAPPING_OPTIONS.objectives));
   return [
     "[meta]",
+    `access_token=${accessToken}`,
     `business_account_ids=${businessAccountId}`,
+    `app_id=${appId}`,
+    `app_secret=${appSecret}`,
     `mapping_divisions=${divisions}`,
     `mapping_lobs=${lobs}`,
     `mapping_segments=${segments}`,
@@ -470,16 +245,13 @@ function serializeIni(values) {
 
 async function loadSettingsIni() {
   try {
-    const raw = await readStorageText(SETTINGS_FILE, "settings.ini");
+    const raw = await fs.readFile(SETTINGS_FILE, "utf8");
     const parsed = parseIni(raw);
     return {
-      accessToken: "",
+      accessToken: parsed.access_token || "",
       businessAccountId: parsed.business_account_ids || "",
-      appId: META_APP_ID_ENV || "",
-      appSecret: "",
-      metaTokenConfigured: Boolean(META_ACCESS_TOKEN_ENV),
-      metaAppConfigured: Boolean(META_APP_ID_ENV),
-      metaAppSecretConfigured: Boolean(META_APP_SECRET_ENV),
+      appId: parsed.app_id || "",
+      appSecret: parsed.app_secret || "",
       mappingOptions: {
         divisions: parseOptionList(parsed.mapping_divisions, DEFAULT_MAPPING_OPTIONS.divisions),
         lobs: parseOptionList(parsed.mapping_lobs, DEFAULT_MAPPING_OPTIONS.lobs),
@@ -492,11 +264,8 @@ async function loadSettingsIni() {
       return {
         accessToken: "",
         businessAccountId: "",
-        appId: META_APP_ID_ENV || "",
+        appId: "",
         appSecret: "",
-        metaTokenConfigured: Boolean(META_ACCESS_TOKEN_ENV),
-        metaAppConfigured: Boolean(META_APP_ID_ENV),
-        metaAppSecretConfigured: Boolean(META_APP_SECRET_ENV),
         mappingOptions: { ...DEFAULT_MAPPING_OPTIONS },
       };
     }
@@ -506,7 +275,7 @@ async function loadSettingsIni() {
 
 async function saveSettingsIni(values) {
   const content = serializeIni(values);
-  await writeStorageText(SETTINGS_FILE, "settings.ini", content);
+  await fs.writeFile(SETTINGS_FILE, content, "utf8");
 }
 
 function normalizeIdentifierRow(row) {
@@ -522,7 +291,7 @@ function normalizeIdentifierRow(row) {
 
 async function loadMappingsFile() {
   try {
-    const raw = await readStorageText(MAPPINGS_FILE, "meta-mappings.json");
+    const raw = await fs.readFile(MAPPINGS_FILE, "utf8");
     const parsed = JSON.parse(raw);
     const list = Array.isArray(parsed?.identifiers) ? parsed.identifiers : [];
     return list.map(normalizeIdentifierRow).filter(r => r.adset || r.adsetId);
@@ -534,7 +303,8 @@ async function loadMappingsFile() {
 
 async function saveMappingsFile(identifiers) {
   const list = Array.isArray(identifiers) ? identifiers.map(normalizeIdentifierRow).filter(r => r.adset || r.adsetId) : [];
-  await writeStorageText(MAPPINGS_FILE, "meta-mappings.json", JSON.stringify({ identifiers: list, updatedAt: new Date().toISOString() }));
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  await fs.writeFile(MAPPINGS_FILE, JSON.stringify({ identifiers: list, updatedAt: new Date().toISOString() }), "utf8");
   return list;
 }
 
@@ -577,28 +347,9 @@ function normalizeBudgetTargets(payload) {
   };
 }
 
-function normalizeImportedCache(input) {
-  const parsed = input && typeof input === "object" ? input : {};
-  const rows = Array.isArray(parsed.rows) ? parsed.rows : (Array.isArray(parsed.data) ? parsed.data : []);
-  const safeRows = rows.filter(r => r && typeof r === "object");
-  const cacheLastDate = parsed.cacheLastDate || latestDate(safeRows);
-  return {
-    rows: safeRows,
-    fetchedAt: parsed.fetchedAt || new Date().toISOString(),
-    since: parsed.since || (safeRows.length ? safeRows.reduce((m, r) => (!m || String(r.day || "") < m ? String(r.day || "") : m), null) : null),
-    until: parsed.until || cacheLastDate || null,
-    accountsQueried: Number(parsed.accountsQueried || 0),
-    accountsSucceeded: Number(parsed.accountsSucceeded || 0),
-    errors: Array.isArray(parsed.errors) ? parsed.errors : [],
-    businessNames: Array.isArray(parsed.businessNames) ? parsed.businessNames : [],
-    discoveredAccounts: Array.isArray(parsed.discoveredAccounts) ? parsed.discoveredAccounts : [],
-    cacheLastDate,
-  };
-}
-
 async function loadBudgetTargetsFile() {
   try {
-    const raw = await readStorageText(BUDGET_TARGETS_FILE, "meta-budget-targets.json");
+    const raw = await fs.readFile(BUDGET_TARGETS_FILE, "utf8");
     const parsed = JSON.parse(raw);
     return normalizeBudgetTargets(parsed?.budgetTargets || parsed || {});
   } catch (err) {
@@ -611,13 +362,14 @@ async function loadBudgetTargetsFile() {
 
 async function saveBudgetTargetsFile(payload) {
   const budgetTargets = normalizeBudgetTargets(payload);
-  await writeStorageText(BUDGET_TARGETS_FILE, "meta-budget-targets.json", JSON.stringify({ budgetTargets, updatedAt: new Date().toISOString() }));
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  await fs.writeFile(BUDGET_TARGETS_FILE, JSON.stringify({ budgetTargets, updatedAt: new Date().toISOString() }), "utf8");
   return budgetTargets;
 }
 
 async function loadCache() {
   try {
-    const raw = await readStorageText(CACHE_FILE, "meta-insights-cache.json");
+    const raw = await fs.readFile(CACHE_FILE, "utf8");
     const parsed = JSON.parse(raw);
     return {
       rows: Array.isArray(parsed.rows) ? parsed.rows : [],
@@ -671,43 +423,24 @@ async function loadCache() {
 }
 
 async function saveCache(rows, meta = {}) {
-  await writeStorageText(CACHE_FILE, "meta-insights-cache.json", JSON.stringify({ rows, ...meta }));
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  await fs.writeFile(CACHE_FILE, JSON.stringify({ rows, ...meta }), "utf8");
 }
 
 async function clearCache() {
-  await deleteStorageFile(CACHE_FILE, "meta-insights-cache.json");
-  if (!isSharePointConfigured()) await deleteStorageFile(LEGACY_CACHE_FILE, "meta-insights-cache-legacy.json");
-}
-
-async function loadImportBuffer() {
-  try {
-    const raw = await readStorageText(IMPORT_BUFFER_FILE, "meta-insights-import-buffer.json");
-    const parsed = JSON.parse(raw);
-    return {
-      rows: Array.isArray(parsed?.rows) ? parsed.rows.filter(r => r && typeof r === "object") : [],
-      meta: parsed?.meta && typeof parsed.meta === "object" ? parsed.meta : {},
-    };
-  } catch (err) {
-    if (err.code === "ENOENT") {
-      return { rows: [], meta: {} };
+  const files = [CACHE_FILE, LEGACY_CACHE_FILE];
+  for (const filePath of files) {
+    try {
+      await fs.unlink(filePath);
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
     }
-    throw err;
   }
-}
-
-async function saveImportBuffer(payload) {
-  const rows = Array.isArray(payload?.rows) ? payload.rows.filter(r => r && typeof r === "object") : [];
-  const meta = payload?.meta && typeof payload.meta === "object" ? payload.meta : {};
-  await writeStorageText(IMPORT_BUFFER_FILE, "meta-insights-import-buffer.json", JSON.stringify({ rows, meta }));
-}
-
-async function clearImportBuffer() {
-  await deleteStorageFile(IMPORT_BUFFER_FILE, "meta-insights-import-buffer.json");
 }
 
 async function loadStatus() {
   try {
-    const raw = await readStorageText(STATUS_FILE, "meta-insights-status.json");
+    const raw = await fs.readFile(STATUS_FILE, "utf8");
     return JSON.parse(raw);
   } catch (err) {
     if (err.code === "ENOENT") {
@@ -718,49 +451,19 @@ async function loadStatus() {
 }
 
 async function saveStatus(status) {
-  await writeStorageText(STATUS_FILE, "meta-insights-status.json", JSON.stringify({ ...status, updatedAt: new Date().toISOString() }));
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  await fs.writeFile(STATUS_FILE, JSON.stringify({ ...status, updatedAt: new Date().toISOString() }), "utf8");
 }
 
 async function clearStatus() {
   await saveStatus({ inProgress: false, updatedAt: new Date().toISOString() });
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 45000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
-  } catch (err) {
-    if (err?.name === "AbortError") {
-      throw new Error(`Request timeout after ${timeoutMs}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function shortText(text, max = 220) {
-  const s = String(text || "").replace(/\s+/g, " ").trim();
-  return s.length > max ? `${s.slice(0, max)}...` : s;
-}
-
-async function fetchJsonOrText(url, options = {}, timeoutMs = 45000) {
-  const res = await fetchWithTimeout(url, options, timeoutMs);
-  const text = await res.text().catch(() => "");
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
-  return { res, json, text };
-}
-
 async function fetchBusinessName(businessId, accessToken) {
   try {
     const params = new URLSearchParams({ fields: "name", access_token: accessToken });
-    const { json } = await fetchJsonOrText(`${META_BASE}/${businessId}?${params}`);
+    const res = await fetch(`${META_BASE}/${businessId}?${params}`);
+    const json = await res.json();
     if (json.error) return null;
     return json.name || null;
   } catch {
@@ -773,7 +476,8 @@ async function fetchOwnedAdAccountsForBusiness(accessToken, businessId) {
   const params = new URLSearchParams({ fields: "account_id,name", access_token: accessToken, limit: 100 });
   let url = `${META_BASE}/${businessId}/owned_ad_accounts?${params}`;
   while (url) {
-    const { json } = await fetchJsonOrText(url);
+    const res = await fetch(url);
+    const json = await res.json();
     if (json.error) throw new Error(`Business ${businessId} lookup failed: ${json.error.message}`);
     (json.data || []).forEach(a => ids.push(a.account_id));
     url = json.paging?.next || null;
@@ -797,7 +501,8 @@ async function fetchAdAccountIds(accessToken, businessIds = []) {
   const params = new URLSearchParams({ fields: "account_id,name", access_token: accessToken, limit: 100 });
   let url = `${META_BASE}/me/adaccounts?${params}`;
   while (url) {
-    const { json } = await fetchJsonOrText(url);
+    const res = await fetch(url);
+    const json = await res.json();
     if (json.error) throw new Error(json.error.message);
     (json.data || []).forEach(a => ids.push(a.account_id));
     url = json.paging?.next || null;
@@ -827,14 +532,8 @@ async function fetchInsightsForAccount(adAccountId, datePreset, since, until, ac
   const rows = [];
 
   while (url) {
-    const { res, json, text } = await fetchJsonOrText(url, {}, 60000);
-    if (!res.ok) {
-      if (json?.error) throw new Error(formatMetaError(json.error, adAccountId));
-      throw new Error(`Meta API error for account ${adAccountId}: HTTP ${res.status} ${shortText(text)}`);
-    }
-    if (!json || typeof json !== "object") {
-      throw new Error(`Meta API error for account ${adAccountId}: Non-JSON response ${shortText(text)}`);
-    }
+    const res = await fetch(url);
+    const json = await res.json();
     if (json.error) throw new Error(formatMetaError(json.error, adAccountId));
 
     const data = json.data || [];
@@ -850,7 +549,6 @@ async function fetchInsightsForAccount(adAccountId, datePreset, since, until, ac
 
       rows.push({
         campaign_name: row.campaign_name,
-        adset_id: row.adset_id,
         adset_name: row.adset_name,
         day: row.date_start,
         account_name: row.account_name,
@@ -893,11 +591,6 @@ function isUnknownMetaError(message = "") {
   return String(message).toLowerCase().includes("unknown error occurred");
 }
 
-function isInactivityTimeoutError(message = "") {
-  const msg = String(message).toLowerCase();
-  return msg.includes("inactivity timeout") || msg.includes("too much time has passed without sending any data") || msg.includes("request timeout") || msg.includes("timed out") || msg.includes("non-json response");
-}
-
 function isRangeTooLargeError(message = "") {
   const msg = String(message).toLowerCase();
   return msg.includes("please reduce the amount of data") || msg.includes("reduce the amount of data") || msg.includes("request code=1");
@@ -913,26 +606,12 @@ function formatMetaError(errorObj, adAccountId) {
 }
 
 async function fetchInsightsWithRetry(adAccountId, datePreset, since, until, accessToken, maxRetries = 3) {
-  if (since && until && daysBetweenISO(since, until) > MAX_DAYS_PER_META_REQUEST) {
-    const rows = [];
-    let cursor = since;
-    while (compareISO(cursor, until) <= 0) {
-      const chunkEnd = compareISO(addDaysISO(cursor, MAX_DAYS_PER_META_REQUEST - 1), until) < 0
-        ? addDaysISO(cursor, MAX_DAYS_PER_META_REQUEST - 1)
-        : until;
-      const part = await fetchInsightsWithRetry(adAccountId, datePreset, cursor, chunkEnd, accessToken, Math.min(maxRetries, 2));
-      rows.push(...part);
-      cursor = addDaysISO(chunkEnd, 1);
-    }
-    return rows;
-  }
-
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fetchInsightsForAccount(adAccountId, datePreset, since, until, accessToken);
     } catch (err) {
       const message = err?.message || "Unknown Meta API error";
-      const retryable = isRateLimitError(message) || isUnknownMetaError(message) || isRangeTooLargeError(message) || isInactivityTimeoutError(message);
+      const retryable = isRateLimitError(message) || isUnknownMetaError(message) || isRangeTooLargeError(message);
 
       if (isRangeTooLargeError(message) && since && until && since !== until) {
         const mid = midDateISO(since, until);
@@ -951,14 +630,6 @@ async function fetchInsightsWithRetry(adAccountId, datePreset, since, until, acc
           day = addDaysISO(day, 1);
         }
         return rows;
-      }
-
-      if (isInactivityTimeoutError(message) && since && until && since !== until) {
-        const mid = midDateISO(since, until);
-        const next = addDaysISO(mid, 1);
-        const left = await fetchInsightsWithRetry(adAccountId, datePreset, since, mid, accessToken, 1);
-        const right = compareISO(next, until) <= 0 ? await fetchInsightsWithRetry(adAccountId, datePreset, next, until, accessToken, 1) : [];
-        return [...left, ...right];
       }
 
       if (!retryable || attempt === maxRetries) throw new Error(message);
@@ -1003,10 +674,7 @@ exports.handler = async function (event) {
   }
 
   const { accessToken, datePreset, since, until, action } = body;
-  const forceRange = body.forceRange === true;
   const businessIds = parseBusinessIds(body.businessAccountId);
-  const startIndexRaw = Number(body.startIndex || 0);
-  const startIndex = Number.isFinite(startIndexRaw) && startIndexRaw > 0 ? Math.floor(startIndexRaw) : 0;
 
   if (action === "load") {
     try {
@@ -1075,125 +743,6 @@ exports.handler = async function (event) {
     }
   }
 
-  if (action === "import_cache") {
-    try {
-      const imported = normalizeImportedCache(body.cache || {});
-      await saveCache(imported.rows, {
-        fetchedAt: imported.fetchedAt,
-        since: imported.since,
-        until: imported.until,
-        accountsQueried: imported.accountsQueried,
-        accountsSucceeded: imported.accountsSucceeded,
-        errors: imported.errors,
-        businessNames: imported.businessNames,
-        discoveredAccounts: imported.discoveredAccounts,
-        cacheLastDate: imported.cacheLastDate,
-      });
-      await clearStatus();
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          ok: true,
-          data: imported.rows,
-          meta: {
-            totalRows: imported.rows.length,
-            fetchedAt: imported.fetchedAt,
-            since: imported.since,
-            until: imported.until,
-            accountsQueried: imported.accountsQueried,
-            accountsSucceeded: imported.accountsSucceeded,
-            discoveredAccounts: imported.discoveredAccounts,
-            errors: imported.errors,
-            businessNames: imported.businessNames,
-            cacheLastDate: imported.cacheLastDate,
-            fromCache: true,
-            imported: true,
-          },
-        }),
-      };
-    } catch (err) {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: `Failed to import cache JSON: ${err.message}` }) };
-    }
-  }
-
-  if (action === "import_cache_start") {
-    try {
-      const meta = body.meta && typeof body.meta === "object" ? body.meta : {};
-      await saveImportBuffer({ rows: [], meta });
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({ ok: true, importedRows: 0 }),
-      };
-    } catch (err) {
-      return { statusCode: 500, headers, body: JSON.stringify({ error: `Failed to start cache import: ${err.message}` }) };
-    }
-  }
-
-  if (action === "import_cache_append") {
-    try {
-      const chunkRows = Array.isArray(body.rows) ? body.rows.filter(r => r && typeof r === "object") : [];
-      if (!chunkRows.length) {
-        return { statusCode: 400, headers, body: JSON.stringify({ error: "rows chunk is required" }) };
-      }
-      const buffer = await loadImportBuffer();
-      const nextRows = [...buffer.rows, ...chunkRows];
-      await saveImportBuffer({ rows: nextRows, meta: buffer.meta });
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({ ok: true, importedRows: nextRows.length }),
-      };
-    } catch (err) {
-      return { statusCode: 500, headers, body: JSON.stringify({ error: `Failed to append cache chunk: ${err.message}` }) };
-    }
-  }
-
-  if (action === "import_cache_finalize") {
-    try {
-      const buffer = await loadImportBuffer();
-      const imported = normalizeImportedCache({ ...(buffer.meta || {}), rows: buffer.rows || [] });
-      await saveCache(imported.rows, {
-        fetchedAt: imported.fetchedAt,
-        since: imported.since,
-        until: imported.until,
-        accountsQueried: imported.accountsQueried,
-        accountsSucceeded: imported.accountsSucceeded,
-        errors: imported.errors,
-        businessNames: imported.businessNames,
-        discoveredAccounts: imported.discoveredAccounts,
-        cacheLastDate: imported.cacheLastDate,
-      });
-      await clearImportBuffer();
-      await clearStatus();
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          ok: true,
-          data: imported.rows,
-          meta: {
-            totalRows: imported.rows.length,
-            fetchedAt: imported.fetchedAt,
-            since: imported.since,
-            until: imported.until,
-            accountsQueried: imported.accountsQueried,
-            accountsSucceeded: imported.accountsSucceeded,
-            discoveredAccounts: imported.discoveredAccounts,
-            errors: imported.errors,
-            businessNames: imported.businessNames,
-            cacheLastDate: imported.cacheLastDate,
-            fromCache: true,
-            imported: true,
-          },
-        }),
-      };
-    } catch (err) {
-      return { statusCode: 500, headers, body: JSON.stringify({ error: `Failed to finalize cache import: ${err.message}` }) };
-    }
-  }
-
   if (action === "load_settings") {
     try {
       const settings = await loadSettingsIni();
@@ -1210,7 +759,10 @@ exports.handler = async function (event) {
   if (action === "save_settings") {
     try {
       await saveSettingsIni({
+        accessToken: body.accessToken || "",
         businessAccountId: body.businessAccountId || "",
+        appId: body.appId || "",
+        appSecret: body.appSecret || "",
         mappingOptions: body.mappingOptions || DEFAULT_MAPPING_OPTIONS,
       });
       const settings = await loadSettingsIni();
@@ -1276,10 +828,7 @@ exports.handler = async function (event) {
     }
   }
 
-  const savedSettings = await loadSettingsIni();
-  const effectiveAccessToken = resolveMetaAccessToken(accessToken, savedSettings.accessToken || "");
-
-  if (!effectiveAccessToken) {
+  if (!accessToken) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "accessToken is required" }) };
   }
 
@@ -1288,9 +837,7 @@ exports.handler = async function (event) {
     const yday = yesterdayISO();
     const initialSince = since || "2025-01-01";
     const cacheLastDate = cache.cacheLastDate || latestDate(cache.rows);
-    const syncSince = startIndex > 0
-      ? initialSince
-      : (forceRange ? initialSince : (cacheLastDate ? addDaysISO(cacheLastDate, 1) : initialSince));
+    const syncSince = cacheLastDate ? addDaysISO(cacheLastDate, 1) : initialSince;
     const syncUntil = until || yday;
 
     // Nothing new to fetch; return cache only.
@@ -1317,13 +864,13 @@ exports.handler = async function (event) {
 
     const businessNames = [];
     for (const bid of businessIds) {
-      const name = await fetchBusinessName(bid, effectiveAccessToken);
+      const name = await fetchBusinessName(bid, accessToken);
       if (name) businessNames.push(name);
     }
 
     let adAccountIds;
     try {
-      adAccountIds = await fetchAdAccountIds(effectiveAccessToken, businessIds);
+      adAccountIds = await fetchAdAccountIds(accessToken, businessIds);
     } catch (e) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: `Failed to discover ad accounts: ${e.message}` }) };
     }
@@ -1334,23 +881,22 @@ exports.handler = async function (event) {
 
     const startedAt = new Date().toISOString();
     const accountStatuses = adAccountIds.map(id => ({ accountId: id, status: "pending", rows: 0, error: null }));
-    const endExclusive = Math.min(adAccountIds.length, startIndex + MAX_ACCOUNTS_PER_SYNC);
     await saveStatus({
       inProgress: true,
       startedAt,
       totalAccounts: adAccountIds.length,
-      completedAccounts: startIndex,
-      currentAccountId: adAccountIds[startIndex] || null,
-      currentAccountIndex: startIndex + 1,
+      completedAccounts: 0,
+      currentAccountId: adAccountIds[0],
+      currentAccountIndex: 1,
       syncSince,
       syncUntil,
       accounts: accountStatuses,
-      message: `Starting sync batch (${startIndex + 1}-${endExclusive} of ${adAccountIds.length})`,
+      message: "Starting sync",
     });
 
     const fetchedRows = [];
     const errors = [];
-    for (let i = startIndex; i < endExclusive; i++) {
+    for (let i = 0; i < adAccountIds.length; i++) {
       const id = adAccountIds[i];
       await saveStatus({
         inProgress: true,
@@ -1366,7 +912,7 @@ exports.handler = async function (event) {
       });
 
       try {
-        const rows = await fetchInsightsWithRetry(id, datePreset, syncSince, syncUntil, effectiveAccessToken);
+        const rows = await fetchInsightsWithRetry(id, datePreset, syncSince, syncUntil, accessToken);
         fetchedRows.push(...rows);
         accountStatuses[i] = { accountId: id, status: "success", rows: rows.length, error: null };
       } catch (err) {
@@ -1389,8 +935,6 @@ exports.handler = async function (event) {
       });
     }
 
-    const partial = endExclusive < adAccountIds.length;
-
     const merged = mergeRows(cache.rows, fetchedRows);
     const fetchedAt = new Date().toISOString();
     const nextCacheLastDate = latestDate(merged);
@@ -1408,9 +952,7 @@ exports.handler = async function (event) {
       cacheLastDate: nextCacheLastDate,
       syncSince,
       syncUntil,
-      syncedNow: !partial,
-      partial,
-      nextAccountIndex: partial ? endExclusive : null,
+      syncedNow: true,
       fromCache: false,
     };
 
@@ -1427,17 +969,17 @@ exports.handler = async function (event) {
     });
 
     await saveStatus({
-      inProgress: partial,
+      inProgress: false,
       startedAt,
       finishedAt: new Date().toISOString(),
       totalAccounts: adAccountIds.length,
-      completedAccounts: endExclusive,
-      currentAccountId: partial ? adAccountIds[endExclusive] || null : null,
-      currentAccountIndex: endExclusive,
+      completedAccounts: adAccountIds.length,
+      currentAccountId: null,
+      currentAccountIndex: adAccountIds.length,
       syncSince,
       syncUntil,
       accounts: accountStatuses,
-      message: partial ? `Batch complete (${endExclusive}/${adAccountIds.length})` : "Sync complete",
+      message: "Sync complete",
     });
 
     return { statusCode: 200, headers, body: JSON.stringify({ data: merged, meta }) };

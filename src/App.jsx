@@ -71,61 +71,55 @@ function apiHeaders(){const headers={"Content-Type":"application/json"};if(API_B
 // Demo mode removed
 const MOCK_RAW=[];
 
-async function parseApiErrorResponse(res){
-  const raw=await res.text().catch(()=>"");
-  let detail="";
-  try{
-    const json=JSON.parse(raw||"{}");
-    detail=json.error||json.message||"";
-  }catch{
-    detail=raw||"";
-  }
-  const head=`HTTP ${res.status}${res.statusText?` ${res.statusText}`:""}`;
-  return detail?`${head} - ${detail}`:head;
-}
-
-async function postMetaApi(payload){
-  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify(payload||{})});
-  if(!res.ok){
-    const message=await parseApiErrorResponse(res);
-    throw new Error(message||"API request failed");
-  }
-  return res.json().catch(()=>({}));
-}
-
-async function fetchLiveData(accessToken,businessAccountId,startIndex=0,since=null,until=null,forceRange=false){
-  const payload={accessToken,businessAccountId:businessAccountId||undefined,startIndex};
-  if(since)payload.since=since;
-  if(until)payload.until=until;
-  if(forceRange)payload.forceRange=true;
-  return postMetaApi(payload);
+async function fetchLiveData(accessToken,businessAccountId){
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({accessToken,businessAccountId:businessAccountId||undefined})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function loadCachedFromApi(){
-  return postMetaApi({action:"load"});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load"})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function clearCacheFromApi(){
-  return postMetaApi({action:"clear"});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"clear"})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function loadSyncStatusFromApi(){
-  return postMetaApi({action:"status"});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"status"})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function loadSettingsFromApi(){
-  return postMetaApi({action:"load_settings"});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load_settings"})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function saveSettingsToApi(accessToken,businessAccountId,appId,appSecret,mappingOptions){
-  return postMetaApi({action:"save_settings",businessAccountId:businessAccountId||"",mappingOptions:mappingOptions||DEFAULT_MAPPING_OPTIONS});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_settings",accessToken:accessToken||"",businessAccountId:businessAccountId||"",appId:appId||"",appSecret:appSecret||"",mappingOptions:mappingOptions||DEFAULT_MAPPING_OPTIONS})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function loadMappingsFromApi(){
-  return postMetaApi({action:"load_mappings"});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load_mappings"})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function saveMappingsToApi(identifiers){
-  return postMetaApi({action:"save_mappings",identifiers:Array.isArray(identifiers)?identifiers:[]});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_mappings",identifiers:Array.isArray(identifiers)?identifiers:[]})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function loadBudgetTargetsFromApi(){
-  return postMetaApi({action:"load_budget_targets"});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load_budget_targets"})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 async function saveBudgetTargetsToApi(payload){
-  return postMetaApi({action:"save_budget_targets",budgetTargets:payload||{}});
+  const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"save_budget_targets",budgetTargets:payload||{}})});
+  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
+  return res.json();
 }
 
 function applyIdentifiers(rows,identifiers){
@@ -171,37 +165,6 @@ function parseCSV(text){
     if(!adset&&!adsetId)return null;
     return{adset,adsetId,division:iDiv>=0?cols[iDiv]:"Retail",lob:iLob>=0?cols[iLob]:"Desktop",segment:iSeg>=0?cols[iSeg]:"Productivity",objective:iObj>=0?cols[iObj]:"Inquiry"};
   }).filter(Boolean);
-}
-
-function toMonthRange(monthLabel){
-  if(MONTH_RANGES[monthLabel])return MONTH_RANGES[monthLabel];
-  const [yearText,monthName]=String(monthLabel||"").split(" ");
-  const year=Number(yearText);
-  const monthIndex=MONTH_IDX[monthName];
-  if(!Number.isFinite(year)||monthIndex==null)return null;
-  const start=new Date(Date.UTC(year,monthIndex,1));
-  const end=new Date(Date.UTC(year,monthIndex+1,0));
-  const fmt=d=>`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
-  return {since:fmt(start),until:fmt(end)};
-}
-
-function addDaysIso(isoDate,days){
-  const d=new Date(`${isoDate}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate()+days);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
-}
-
-function splitRangeIntoWindows(since,until,windowDays=7){
-  if(!since||!until)return[];
-  const windows=[];
-  let cursor=since;
-  while(cursor<=until){
-    const end=addDaysIso(cursor,windowDays-1);
-    const clampedEnd=end<until?end:until;
-    windows.push({since:cursor,until:clampedEnd});
-    cursor=addDaysIso(clampedEnd,1);
-  }
-  return windows;
 }
 
 // CSS
@@ -971,7 +934,7 @@ function Breakdown({data}){
 }
 
 // Data
-function DataView({data,fetchMeta,syncStatus,tokenStatus}){
+function DataView({data,fetchMeta,syncStatus,onFacebookLogin,loginBusy,appId,tokenStatus}){
   const rows=useMemo(()=>[...data].sort((a,b)=>String(b.day||"").localeCompare(String(a.day||""))),[data]);
   const [tablePage,setTablePage]=useState(1);
   const [rowsPerPage,setRowsPerPage]=useState(200);
@@ -1003,12 +966,25 @@ function DataView({data,fetchMeta,syncStatus,tokenStatus}){
   ];
   return(<div>
     <div className="card" style={{marginBottom:14}}>
-      <div className="card-hdr" style={{marginBottom:0}}><div className="card-ttl">Meta Connection</div></div>
-      <div style={{fontSize:12,color:"#64748B",marginTop:8}}>
-        API credentials are loaded from Netlify environment variables.
+      <div className="card-hdr" style={{marginBottom:0}}>
+        <div className="card-ttl">Meta Login</div>
+        {tokenStatus==="valid"?(
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{fontSize:12,color:"#16A34A",fontWeight:600}}>Facebook connected</div>
+            <button className="btn" onClick={onFacebookLogin} disabled={loginBusy} style={{padding:"4px 10px",fontSize:12,display:"flex",alignItems:"center",gap:6}}>
+              {loginBusy&&<span className="spin"/>}
+              {loginBusy?"Opening...":"Reconnect"}
+            </button>
+          </div>
+        ):(
+          <button className="btn btn-p" onClick={onFacebookLogin} disabled={loginBusy} style={{display:"flex",alignItems:"center",gap:6}}>
+            {loginBusy&&<span className="spin"/>}
+            {loginBusy?"Opening Facebook…":"Login with Facebook"}
+          </button>
+        )}
       </div>
-      <div style={{fontSize:12,color:tokenStatus==="valid"?"#16A34A":tokenStatus==="invalid"?"#DC2626":"#64748B",marginTop:6,fontWeight:600}}>
-        {tokenStatus==="valid"?"Token verified":tokenStatus==="invalid"?"Token invalid":"Token status unknown"}
+      <div style={{fontSize:12,color:"#64748B",marginTop:8}}>
+        {appId?`Using App ID ${appId}`:"Set App ID in Settings first, then click Login with Facebook."}
       </div>
     </div>
     {syncStatus?.inProgress&&(
@@ -1120,24 +1096,24 @@ function Settings({settings,setSettings,identifiers,toast,persistServerSettings}
   };
   const removeOption=(k,val)=>setLoc(p=>({...p,mappingOptions:{...(p.mappingOptions||DEFAULT_MAPPING_OPTIONS),[k]:listOf(k).filter(v=>v!==val)}}));
   const save=async()=>{
-    const next={...loc,accessToken:"",appSecret:""};
-    setSettings(next);
-    saveLS({...next,identifiers});
+    setSettings(loc);
+    saveLS({...loc,identifiers});
     try{
-      await persistServerSettings("",next.businessAccountId||"",next.appId||"","",next.mappingOptions||DEFAULT_MAPPING_OPTIONS);
+      await persistServerSettings(loc.accessToken||"",loc.businessAccountId||"",loc.appId||"",loc.appSecret||"",loc.mappingOptions||DEFAULT_MAPPING_OPTIONS);
       toast("Settings saved ✓");
     }catch(e){
-      toast(`Saved locally, but failed to write settings storage: ${e.message||"Unknown error"}`,true);
+      toast(`Saved locally, but failed to write settings.ini: ${e.message||"Unknown error"}`,true);
     }
   };
 
   return(<div>
     <div className="card">
       <div className="sec-ttl">Meta Access Token</div>
-      <div className="info-box" style={{marginBottom:11}}>Meta Access Token, Meta App ID, and Meta App Secret are now managed via Netlify environment variables only for better security.</div>
+      <div className="info-box" style={{marginBottom:11}}>Paste your Meta User Access Token below. The app will automatically detect all ad accounts linked to this token when using Live Meta API mode.</div>
+      <div><label>Access Token</label><input type="password" placeholder="Paste your Meta access token here..." value={loc.accessToken||""} onChange={e=>setLoc(p=>({...p,accessToken:e.target.value}))} /></div>
       <div><label>Business Account IDs <span style={{fontWeight:400,color:"#64748B"}}>(optional — comma-separated, owned accounts only)</span></label><input type="text" placeholder="e.g. 123456789012345, 678901234567890" value={loc.businessAccountId||""} onChange={e=>setLoc(p=>({...p,businessAccountId:e.target.value}))} /></div>
-      <div><label>Meta App ID <span style={{fontWeight:400,color:"#64748B"}}>(from server env)</span></label><input type="text" value={loc.appId||"Not configured"} disabled /></div>
-      <div><label>Meta App Secret <span style={{fontWeight:400,color:"#64748B"}}>(from server env)</span></label><input type="text" value={loc.metaAppSecretConfigured?"Configured":"Not configured"} disabled /></div>
+      <div><label>Meta App ID <span style={{fontWeight:400,color:"#64748B"}}>(for Login with Facebook)</span></label><input type="text" placeholder="e.g. 123456789012345" value={loc.appId||""} onChange={e=>setLoc(p=>({...p,appId:e.target.value}))} /></div>
+      <div><label>Meta App Secret <span style={{fontWeight:400,color:"#64748B"}}>(stored server-side; optional for now)</span></label><input type="password" placeholder="App Secret" value={loc.appSecret||""} onChange={e=>setLoc(p=>({...p,appSecret:e.target.value}))} /></div>
     </div>
     <div className="card">
       <div className="sec-ttl">Mapping Selection Lists</div>
@@ -1158,7 +1134,7 @@ function Settings({settings,setSettings,identifiers,toast,persistServerSettings}
           </div>
         </div>
       ))}
-      <div style={{fontSize:11,color:"#64748B"}}>These lists are used by the Mapping page dropdown selections and saved to persistent storage.</div>
+      <div style={{fontSize:11,color:"#64748B"}}>These lists are used by the Mapping page dropdown selections and saved to settings.ini.</div>
     </div>
     <div style={{display:"flex",gap:9}}><button className="btn btn-p" onClick={save}>Save Settings</button><button className="btn" onClick={()=>setLoc({...settings})}>Discard</button></div>
   </div>);
@@ -1490,8 +1466,7 @@ const NAV=[
 const PT={overview:"Monthly Overview",breakdown:"Monthly Breakdown",desktop:"Desktop Dashboard",lts:"LTS Dashboard",lsa:"LSA Dashboard",trends:"Trends & Graphs",settings:"Settings",budget:"Budget and Target",mapping:"Mapping",data:"Data"};
 
 export default function App(){
-  const savedRaw=loadLS();
-  const saved=savedRaw?{...savedRaw,accessToken:"",appSecret:""}:null;
+  const saved=loadLS();
   const [page,setPage]=useState("overview");
   const [navCollapsed,setNavCollapsed]=useState(false);
   const [theme,setTheme]=useState(loadTheme);
@@ -1506,10 +1481,7 @@ export default function App(){
   const [discoveredAccounts,setDiscoveredAccounts]=useState([]);
   const [tokenStatus,setTokenStatus]=useState(null);
   const [businessName,setBusinessName]=useState(null);
-  const [fetchRangeMode,setFetchRangeMode]=useState("incremental");
-  const [fetchMonth,setFetchMonth]=useState(()=>saved?.defaultMonth||"2026 MARCH");
-  const [fetchSince,setFetchSince]=useState("");
-  const [fetchUntil,setFetchUntil]=useState("");
+  const [loginBusy,setLoginBusy]=useState(false);
   const [configUnlocked,setConfigUnlocked]=useState(loadConfigUnlocked);
   const [passwordInput,setPasswordInput]=useState("");
   const [passwordError,setPasswordError]=useState("");
@@ -1539,27 +1511,11 @@ export default function App(){
   const completeOrgAuth=useCallback(async(account)=>{
     if(!msalClient||!account)throw new Error("No Microsoft account selected");
     const resp=await msalClient.acquireTokenSilent({account,scopes:["openid","profile","email"]});
-    const idToken=String(resp?.idToken||"").trim();
-    if(!idToken)throw new Error("Microsoft session token not available. Please sign in again.");
     if(!isAllowedOrgEmail(account.username||""))throw new Error("This Microsoft account is not in the allowed list for this app.");
-    setApiAuthToken(idToken);
+    setApiAuthToken(resp.idToken||"");
     setOrgAccount(account);
     setOrgAuthError("");
   },[msalClient,isAllowedOrgEmail]);
-
-  const ensureApiToken=useCallback(async()=>{
-    if(API_BEARER_TOKEN)return true;
-    if(!msalClient||!orgAccount)return false;
-    try{
-      const resp=await msalClient.acquireTokenSilent({account:orgAccount,scopes:["openid","profile","email"]});
-      const idToken=String(resp?.idToken||"").trim();
-      if(!idToken)return false;
-      setApiAuthToken(idToken);
-      return true;
-    }catch{
-      return false;
-    }
-  },[msalClient,orgAccount]);
 
   const signInWithMicrosoft=useCallback(async()=>{
     if(!msalClient){setOrgAuthError("Microsoft login is not configured.");return;}
@@ -1633,7 +1589,6 @@ export default function App(){
   },[msalClient,completeOrgAuth]);
 
   const loadCachedData=useCallback(async()=>{
-    if(!(await ensureApiToken()))return;
     try{
       const r=await loadCachedFromApi();
       setRawData(r.data||[]);
@@ -1644,22 +1599,21 @@ export default function App(){
         if(Array.isArray(r.meta.businessNames)&&r.meta.businessNames.length)setBusinessName(r.meta.businessNames.join(", "));else setBusinessName(null);
       }
     }catch{/* no cache yet — silent */}
-  },[ensureApiToken]);
+  },[]);
 
   const loadServerSettings=useCallback(async()=>{
     try{
       const r=await loadSettingsFromApi();
       const server=r?.settings||{};
-      if(server.businessAccountId||server.appId||server.mappingOptions||server.metaTokenConfigured!=null){
+      if(server.accessToken||server.businessAccountId||server.appId||server.appSecret||server.mappingOptions){
         setSettings(prev=>({
           ...prev,
-          accessToken:"",
+          accessToken:server.accessToken||prev.accessToken||"",
           businessAccountId:server.businessAccountId||prev.businessAccountId||"",
           appId:server.appId||prev.appId||"",
-          appSecret:"",
+          appSecret:server.appSecret||prev.appSecret||"",
           mappingOptions:server.mappingOptions||prev.mappingOptions||DEFAULT_MAPPING_OPTIONS,
         }));
-        if(server.metaTokenConfigured===false)setTokenStatus("invalid");
       }
     }catch{/* optional settings file; ignore on startup */}
   },[]);
@@ -1712,8 +1666,61 @@ export default function App(){
     await saveBudgetTargetsToApi(payload);
   },[]);
 
+  const loginWithFacebook=useCallback(async()=>{
+    if(!settings.appId?.trim()){
+      showToast("Add Meta App ID in Settings first",true);
+      return;
+    }
+    const redirectUri=`${window.location.origin}${window.location.pathname}`;
+    const state=Math.random().toString(36).slice(2);
+    const params=new URLSearchParams({
+      client_id:settings.appId.trim(),
+      redirect_uri:redirectUri,
+      response_type:"token",
+      scope:"ads_read,ads_management,business_management",
+      state,
+    });
+    const authUrl=`https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`;
+    const popup=window.open(authUrl,"fb_login","width=540,height=720");
+    if(!popup){showToast("Popup blocked. Allow popups then try again.",true);return;}
+    setLoginBusy(true);
+    const start=Date.now();
+    const poll=window.setInterval(async()=>{
+      if(popup.closed){
+        window.clearInterval(poll);
+        setLoginBusy(false);
+        return;
+      }
+      if(Date.now()-start>180000){
+        popup.close();
+        window.clearInterval(poll);
+        setLoginBusy(false);
+        showToast("Facebook login timed out. Try again.",true);
+        return;
+      }
+      try{
+        const href=popup.location.href;
+        const hash=popup.location.hash||"";
+        if(!href.startsWith(redirectUri)||!hash.includes("access_token="))return;
+        const parsed=new URLSearchParams(hash.replace(/^#/,""));
+        const token=parsed.get("access_token")||"";
+        popup.close();
+        window.clearInterval(poll);
+        setLoginBusy(false);
+        if(!token){showToast("Login completed but token was not returned.",true);return;}
+        const next={...settings,accessToken:token};
+        setSettings(next);
+        saveLS({...next,identifiers});
+        await persistServerSettings(token,next.businessAccountId||"",next.appId||"",next.appSecret||"",next.mappingOptions||DEFAULT_MAPPING_OPTIONS);
+        setTokenStatus("valid");
+        showToast("Facebook login succeeded. Token saved ✓");
+      }catch{
+        // Ignore cross-origin reads until popup returns to redirect URI.
+      }
+    },450);
+  },[settings,identifiers,persistServerSettings]);
+
   const clearCache=useCallback(async()=>{
-    if(!(await ensureApiToken())){showToast("Session expired. Please sign in with Microsoft again.",true);return;}
     const step1=window.confirm("Step 1/2: This will clear all cached Meta data. Continue?");
     if(!step1)return;
     const step2=window.prompt("Step 2/2: Type CLEAR CACHE to confirm");
@@ -1733,43 +1740,10 @@ export default function App(){
     }catch(e){
       showToast(`Failed to clear cache: ${e.message||"Unknown error"}`,true);
     }finally{setLoading(false);}
-  },[ensureApiToken]);
+  },[]);
 
   const fetchData=useCallback(async()=>{
-    if(!(await ensureApiToken())){
-      showToast("Session expired. Please sign in with Microsoft again.",true);
-      return;
-    }
-    let selectedSince=null;
-    let selectedUntil=null;
-    let forceRange=false;
-    if(fetchRangeMode==="month"){
-      const range=toMonthRange(fetchMonth);
-      if(!range){
-        showToast("Please select a valid month.",true);
-        return;
-      }
-      selectedSince=range.since;
-      selectedUntil=range.until;
-      forceRange=true;
-    }else if(fetchRangeMode==="custom"){
-      if(!fetchSince||!fetchUntil){
-        showToast("Please set both start and end dates.",true);
-        return;
-      }
-      if(fetchSince>fetchUntil){
-        showToast("Start date must be on or before end date.",true);
-        return;
-      }
-      selectedSince=fetchSince;
-      selectedUntil=fetchUntil;
-      forceRange=true;
-    }
-
-    const fetchWindows=(forceRange&&selectedSince&&selectedUntil)
-      ?splitRangeIntoWindows(selectedSince,selectedUntil,7)
-      :[{since:null,until:null}];
-
+    if(!settings.accessToken?.trim()){showToast("Add your Access Token in Settings",true);return;}
     setLoading(true);setApiErrors([]);
     setSyncStatus({inProgress:true,message:"Starting sync…",totalAccounts:0,completedAccounts:0,currentAccountIndex:0,currentAccountId:null,startedAt:new Date().toISOString()});
     let pollId=null;
@@ -1778,27 +1752,7 @@ export default function App(){
     };
     pollId=setInterval(poll,1200);
     try{
-      let r=null;
-      for(const win of fetchWindows){
-        let startIndex=0;
-        let batchSince=null;
-        let batchUntil=null;
-        for(let i=0;i<100;i++){
-          r=await fetchLiveData(
-            settings.accessToken,
-            settings.businessAccountId,
-            startIndex,
-            batchSince||win.since,
-            batchUntil||win.until,
-            forceRange
-          );
-          if(!batchSince&&r?.meta?.syncSince)batchSince=r.meta.syncSince;
-          if(!batchUntil&&r?.meta?.syncUntil)batchUntil=r.meta.syncUntil;
-          if(!r?.meta?.partial)break;
-          startIndex=Number(r.meta.nextAccountIndex||0);
-          if(!Number.isFinite(startIndex)||startIndex<=0)break;
-        }
-      }
+      const r=await fetchLiveData(settings.accessToken,settings.businessAccountId);
       setRawData(r.data||[]);
       if(r.meta){
         const effectiveErrors=r.meta.syncedNow===false?[]:(r.meta.errors||[]);
@@ -1815,9 +1769,9 @@ export default function App(){
 
         if(effectiveErrors.length){
           setApiErrors(effectiveErrors);
-          if(hasTokenError)showToast("Access token is expired/invalid. Update META_ACCESS_TOKEN in Netlify environment variables.",true);
+          if(hasTokenError)showToast("Access token is expired/invalid. Update token in Settings and save again.",true);
           else showToast(`Fetched with ${effectiveErrors.length} error(s)`,true);
-        }else if(r.meta?.syncedNow===false&&!r.meta?.partial){
+        }else if(r.meta?.syncedNow===false){
           setApiErrors([]);
           showToast("No missing dates. Cache is already up to date ✓");
         }else{
@@ -1831,29 +1785,13 @@ export default function App(){
     }catch(e){
       const msg=e.message||"";
       if(msg.toLowerCase().includes("token")||msg.toLowerCase().includes("oauth")||msg.toLowerCase().includes("auth"))setTokenStatus("invalid");
-      if(msg.includes("HTTP 502")){
-        try{
-          const cached=await loadCachedFromApi();
-          const cachedRows=Array.isArray(cached?.data)?cached.data:[];
-          if(cachedRows.length){
-            setRawData(cachedRows);
-            setFetchMeta(cached.meta||null);
-            setSyncStatus(null);
-            setApiErrors([]);
-            setDiscoveredAccounts(cached.meta?.discoveredAccounts||[]);
-            if(Array.isArray(cached.meta?.businessNames)&&cached.meta.businessNames.length)setBusinessName(cached.meta.businessNames.join(", "));else setBusinessName(null);
-            showToast(`Meta API timed out. Loaded ${cachedRows.length.toLocaleString()} cached rows instead.`,true);
-            return;
-          }
-        }catch{}
-      }
       showToast(`API error: ${msg}`,true);setApiErrors([{error:msg}]);
     }finally{
       if(pollId)clearInterval(pollId);
       try{const p=await loadSyncStatusFromApi();if(p.status)setSyncStatus(p.status);}catch{}
       setLoading(false);
     }
-  },[ensureApiToken,fetchMonth,fetchRangeMode,fetchSince,fetchUntil,settings.businessAccountId]);
+  },[settings.accessToken,settings.businessAccountId]);
 
   useEffect(()=>{
     if(!orgAccount)return;
@@ -1929,20 +1867,6 @@ export default function App(){
           <div><div className="pg-title">{PT[page]}</div><div className="pg-sub">EasyPC Marketing Analytics{page==="data"?"":" · "+month}</div></div>
           {page==="data"?(
             <div className="topbar-r">
-              <select value={fetchRangeMode} onChange={e=>setFetchRangeMode(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}}>
-                <option value="incremental">Incremental (recommended)</option>
-                <option value="month">By month</option>
-                <option value="custom">Custom date range</option>
-              </select>
-              {fetchRangeMode==="month"&&(
-                <select value={fetchMonth} onChange={e=>setFetchMonth(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}}>{MONTH_OPTIONS.map(m=><option key={m}>{m}</option>)}</select>
-              )}
-              {fetchRangeMode==="custom"&&(
-                <>
-                  <input type="date" value={fetchSince} onChange={e=>setFetchSince(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}} />
-                  <input type="date" value={fetchUntil} onChange={e=>setFetchUntil(e.target.value)} style={{width:"auto",padding:"5px 10px",fontSize:14}} />
-                </>
-              )}
               <button className="btn btn-p" onClick={fetchData} disabled={loading||protectedPage} style={{display:"flex",alignItems:"center",gap:5}}>{loading&&<span className="spin"/>}{loading?"Fetching…":"Fetch Data from Meta API"}</button>
               <button className="btn" onClick={clearCache} disabled={loading||protectedPage}>Clear Cache</button>
             </div>
@@ -1965,7 +1889,7 @@ export default function App(){
             {page==="settings"  &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><Settings settings={settings} setSettings={setSettings} identifiers={identifiers} toast={showToast} persistServerSettings={persistServerSettings}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
             {page==="budget"    &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><BudgetTargets settings={settings} setSettings={setSettings} identifiers={identifiers} toast={showToast} persistBudgetTargets={persistBudgetTargets}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
             {page==="mapping"   &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><Mapping settings={settings} setSettings={setSettings} identifiers={identifiers} setIdentifiers={setIdentifiers} toast={showToast} rawData={rawData} persistMappings={persistMappings}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
-            {page==="data"      &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><DataView data={rawData} fetchMeta={fetchMeta} syncStatus={syncStatus} tokenStatus={tokenStatus}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
+            {page==="data"      &&<div className="guard-wrap"><div className={`guard-content ${protectedPage?"is-locked":""}`}><DataView data={rawData} fetchMeta={fetchMeta} syncStatus={syncStatus} onFacebookLogin={loginWithFacebook} loginBusy={loginBusy} appId={settings.appId} tokenStatus={tokenStatus}/></div>{protectedPage&&<div className="guard-overlay"><form className="guard-card" onSubmit={unlockProtectedPages}><div className="guard-title">Protected Page</div><div className="guard-sub">Enter password to access Settings, Budget and Target, Mapping, and Data.</div><label>Password</label><input type="password" value={passwordInput} onChange={e=>{setPasswordInput(e.target.value);if(passwordError)setPasswordError("");}} placeholder="Enter access password" autoFocus />{passwordError&&<div className="guard-err">{passwordError}</div>}<div style={{marginTop:10,display:"flex",justifyContent:"flex-end"}}><button className="btn btn-p" type="submit">Unlock</button></div></form></div>}</div>} 
           </div>)}
         </div>
       </div>
