@@ -1539,11 +1539,27 @@ export default function App(){
   const completeOrgAuth=useCallback(async(account)=>{
     if(!msalClient||!account)throw new Error("No Microsoft account selected");
     const resp=await msalClient.acquireTokenSilent({account,scopes:["openid","profile","email"]});
+    const idToken=String(resp?.idToken||"").trim();
+    if(!idToken)throw new Error("Microsoft session token not available. Please sign in again.");
     if(!isAllowedOrgEmail(account.username||""))throw new Error("This Microsoft account is not in the allowed list for this app.");
-    setApiAuthToken(resp.idToken||"");
+    setApiAuthToken(idToken);
     setOrgAccount(account);
     setOrgAuthError("");
   },[msalClient,isAllowedOrgEmail]);
+
+  const ensureApiToken=useCallback(async()=>{
+    if(API_BEARER_TOKEN)return true;
+    if(!msalClient||!orgAccount)return false;
+    try{
+      const resp=await msalClient.acquireTokenSilent({account:orgAccount,scopes:["openid","profile","email"]});
+      const idToken=String(resp?.idToken||"").trim();
+      if(!idToken)return false;
+      setApiAuthToken(idToken);
+      return true;
+    }catch{
+      return false;
+    }
+  },[msalClient,orgAccount]);
 
   const signInWithMicrosoft=useCallback(async()=>{
     if(!msalClient){setOrgAuthError("Microsoft login is not configured.");return;}
@@ -1617,6 +1633,7 @@ export default function App(){
   },[msalClient,completeOrgAuth]);
 
   const loadCachedData=useCallback(async()=>{
+    if(!(await ensureApiToken()))return;
     try{
       const r=await loadCachedFromApi();
       setRawData(r.data||[]);
@@ -1627,7 +1644,7 @@ export default function App(){
         if(Array.isArray(r.meta.businessNames)&&r.meta.businessNames.length)setBusinessName(r.meta.businessNames.join(", "));else setBusinessName(null);
       }
     }catch{/* no cache yet — silent */}
-  },[]);
+  },[ensureApiToken]);
 
   const loadServerSettings=useCallback(async()=>{
     try{
@@ -1696,6 +1713,7 @@ export default function App(){
   },[]);
 
   const clearCache=useCallback(async()=>{
+    if(!(await ensureApiToken())){showToast("Session expired. Please sign in with Microsoft again.",true);return;}
     const step1=window.confirm("Step 1/2: This will clear all cached Meta data. Continue?");
     if(!step1)return;
     const step2=window.prompt("Step 2/2: Type CLEAR CACHE to confirm");
@@ -1715,9 +1733,13 @@ export default function App(){
     }catch(e){
       showToast(`Failed to clear cache: ${e.message||"Unknown error"}`,true);
     }finally{setLoading(false);}
-  },[]);
+  },[ensureApiToken]);
 
   const fetchData=useCallback(async()=>{
+    if(!(await ensureApiToken())){
+      showToast("Session expired. Please sign in with Microsoft again.",true);
+      return;
+    }
     let selectedSince=null;
     let selectedUntil=null;
     let forceRange=false;
@@ -1831,7 +1853,7 @@ export default function App(){
       try{const p=await loadSyncStatusFromApi();if(p.status)setSyncStatus(p.status);}catch{}
       setLoading(false);
     }
-  },[fetchMonth,fetchRangeMode,fetchSince,fetchUntil,settings.businessAccountId]);
+  },[ensureApiToken,fetchMonth,fetchRangeMode,fetchSince,fetchUntil,settings.businessAccountId]);
 
   useEffect(()=>{
     if(!orgAccount)return;
