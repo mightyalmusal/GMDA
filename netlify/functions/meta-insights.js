@@ -32,6 +32,7 @@ const META_ACCESS_TOKEN_ENV = String(process.env.META_ACCESS_TOKEN || "").trim()
 const META_APP_ID_ENV = String(process.env.META_APP_ID || "").trim();
 const META_APP_SECRET_ENV = String(process.env.META_APP_SECRET || "").trim();
 const MAX_ACCOUNTS_PER_SYNC = Math.max(1, Number(process.env.MAX_ACCOUNTS_PER_SYNC || 2));
+const MAX_DAYS_PER_META_REQUEST = Math.max(1, Number(process.env.MAX_DAYS_PER_META_REQUEST || 7));
   const SP_STORAGE_ENABLED = String(process.env.SP_STORAGE_ENABLED || "").trim().toLowerCase() === "true";
   const SP_TENANT_ID = String(process.env.SP_TENANT_ID || AAD_TENANT_ID || "").trim();
   const SP_CLIENT_ID = String(process.env.SP_CLIENT_ID || "").trim();
@@ -912,11 +913,13 @@ function formatMetaError(errorObj, adAccountId) {
 }
 
 async function fetchInsightsWithRetry(adAccountId, datePreset, since, until, accessToken, maxRetries = 3) {
-  if (since && until && daysBetweenISO(since, until) > 31) {
+  if (since && until && daysBetweenISO(since, until) > MAX_DAYS_PER_META_REQUEST) {
     const rows = [];
     let cursor = since;
     while (compareISO(cursor, until) <= 0) {
-      const chunkEnd = compareISO(addDaysISO(cursor, 30), until) < 0 ? addDaysISO(cursor, 30) : until;
+      const chunkEnd = compareISO(addDaysISO(cursor, MAX_DAYS_PER_META_REQUEST - 1), until) < 0
+        ? addDaysISO(cursor, MAX_DAYS_PER_META_REQUEST - 1)
+        : until;
       const part = await fetchInsightsWithRetry(adAccountId, datePreset, cursor, chunkEnd, accessToken, Math.min(maxRetries, 2));
       rows.push(...part);
       cursor = addDaysISO(chunkEnd, 1);

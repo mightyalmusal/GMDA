@@ -1809,6 +1809,22 @@ export default function App(){
     }catch(e){
       const msg=e.message||"";
       if(msg.toLowerCase().includes("token")||msg.toLowerCase().includes("oauth")||msg.toLowerCase().includes("auth"))setTokenStatus("invalid");
+      if(msg.includes("HTTP 502")){
+        try{
+          const cached=await loadCachedFromApi();
+          const cachedRows=Array.isArray(cached?.data)?cached.data:[];
+          if(cachedRows.length){
+            setRawData(cachedRows);
+            setFetchMeta(cached.meta||null);
+            setSyncStatus(null);
+            setApiErrors([]);
+            setDiscoveredAccounts(cached.meta?.discoveredAccounts||[]);
+            if(Array.isArray(cached.meta?.businessNames)&&cached.meta.businessNames.length)setBusinessName(cached.meta.businessNames.join(", "));else setBusinessName(null);
+            showToast(`Meta API timed out. Loaded ${cachedRows.length.toLocaleString()} cached rows instead.`,true);
+            return;
+          }
+        }catch{}
+      }
       showToast(`API error: ${msg}`,true);setApiErrors([{error:msg}]);
     }finally{
       if(pollId)clearInterval(pollId);
