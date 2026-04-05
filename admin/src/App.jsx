@@ -35,6 +35,9 @@ const LOCAL_CACHE_KEY="easypc_local_cache_rows";
 const AAD_TENANT_ID=import.meta.env.VITE_AAD_TENANT_ID||"973ec11f-980d-4bd7-9443-fe528f0a752b";
 const AAD_CLIENT_ID=import.meta.env.VITE_AAD_CLIENT_ID||"e7c8038f-4c5a-4be8-bce1-a3d42e0e38f5";
 const AAD_ALLOWED_EMAILS=(import.meta.env.VITE_ALLOWED_EMAILS||"").split(",").map(v=>v.trim().toLowerCase()).filter(Boolean);
+const OWNER_EMAILS=(import.meta.env.VITE_OWNER_EMAILS||"").split(",").map(v=>v.trim().toLowerCase()).filter(Boolean);
+const EDITOR_EMAILS=(import.meta.env.VITE_EDITOR_EMAILS||"").split(",").map(v=>v.trim().toLowerCase()).filter(Boolean);
+const R2_PUBLIC_URL=(import.meta.env.VITE_R2_PUBLIC_URL||"").replace(/\/$/,"");
 const DEFAULT_MAPPING_OPTIONS={divisions:[...DIVISIONS],lobs:[...LOBS],segments:[...ALL_SEGS],objectives:[...OBJECTIVES]};
 
 const fmt=v=>`₱${Number(v||0).toLocaleString("en-PH",{minimumFractionDigits:0,maximumFractionDigits:0})}`;
@@ -98,6 +101,14 @@ async function fetchLiveData(accessToken,businessAccountId){
   return res.json();
 }
 async function loadCachedFromApi(){
+  // Load large cache file directly from R2 public URL to avoid Pages Function CPU limits
+  if(R2_PUBLIC_URL){
+    const res=await fetch(`${R2_PUBLIC_URL}/meta-insights-cache.json`,{cache:"no-store"});
+    if(!res.ok)throw new Error(`Failed to load cache from R2: ${res.status}`);
+    const data=await res.json();
+    const rows=Array.isArray(data?.rows)?data.rows:Array.isArray(data?.data)?data.data:Array.isArray(data)?data:[];
+    return{rows,meta:data?.meta||{totalRows:rows.length,fromCache:true}};
+  }
   const res=await fetch("/api/meta-insights",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"load"})});
   if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
   return res.json();
@@ -142,12 +153,6 @@ async function saveBudgetTargetsToApi(payload){
   if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"API error");}
   return res.json();
 }
-async function publishToR2(){
-  const res=await fetch("/api/publish",{method:"POST",headers:apiHeaders(),body:JSON.stringify({action:"publish"})});
-  if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||"Publish failed");}
-  return res.json();
-}
-
 function applyIdentifiers(rows,identifiers){
   return rows.map(r=>{
     const id=identifiers.find(i=>(i.adsetId&&i.adsetId===r.adset_id)||(i.adset===r.adset_name));
@@ -1334,6 +1339,13 @@ function Mapping({settings,setSettings,identifiers,setIdentifiers,toast,rawData,
   const [selectedAccounts,setSelectedAccounts]=useState([]);
   const [adsetRowsPerPage,setAdsetRowsPerPage]=useState(20);
   const [adsetPage,setAdsetPage]=useState(1);
+  const [mappingRowsPerPage,setMappingRowsPerPage]=useState(20);
+  const [mappingPage,setMappingPage]=useState(1);
+  const [mappingSearch,setMappingSearch]=useState("");
+  const [mappingDivFilter,setMappingDivFilter]=useState("");
+  const [mappingLobFilter,setMappingLobFilter]=useState("");
+  const [mappingSegFilter,setMappingSegFilter]=useState("");
+  const [mappingObjFilter,setMappingObjFilter]=useState("");
   const mappingOptions=settings.mappingOptions||DEFAULT_MAPPING_OPTIONS;
   const fRef=useRef();
   const addId=()=>{if(!adsetIn.trim())return;setIds(p=>[...p,{adset:adsetIn.trim(),adsetId:"",division:"",lob:"",segment:"",objective:""}]);setAdsetIn("");};
@@ -1397,10 +1409,16 @@ function Mapping({settings,setSettings,identifiers,setIdentifiers,toast,rawData,
     });
   },[uniqueAdsets,adsetSearch,mappedNameSet,adsetMappedFilter]);
   useEffect(()=>{setAdsetPage(1);},[adsetSearch,adsetMappedFilter,selectedAccounts,adsetRowsPerPage,tab]);
+  useEffect(()=>{setMappingPage(1);},[mappingSearch,mappingDivFilter,mappingLobFilter,mappingSegFilter,mappingObjFilter,mappingRowsPerPage,tab]);
   const adsetTotalPages=Math.max(1,Math.ceil(visibleAdsets.length/adsetRowsPerPage));
   const adsetSafePage=Math.min(adsetPage,adsetTotalPages);
   const adsetStart=(adsetSafePage-1)*adsetRowsPerPage;
   const pagedAdsets=useMemo(()=>visibleAdsets.slice(adsetStart,adsetStart+adsetRowsPerPage),[visibleAdsets,adsetStart,adsetRowsPerPage]);
+  const filteredMappingIds=useMemo(()=>{const q=mappingSearch.trim().toLowerCase();return ids.map((id,idx)=>({id,idx})).filter(({id})=>{if(q&&!String(id.adset||"").toLowerCase().includes(q))return false;if(mappingDivFilter&&(id.division||"")!==mappingDivFilter)return false;if(mappingLobFilter&&(id.lob||"")!==mappingLobFilter)return false;if(mappingSegFilter&&(id.segment||"")!==mappingSegFilter)return false;if(mappingObjFilter&&(id.objective||"")!==mappingObjFilter)return false;return true;});},[ids,mappingSearch,mappingDivFilter,mappingLobFilter,mappingSegFilter,mappingObjFilter]);
+  const mappingTotalPages=Math.max(1,Math.ceil(filteredMappingIds.length/mappingRowsPerPage));
+  const mappingSafePage=Math.min(mappingPage,mappingTotalPages);
+  const mappingStart=(mappingSafePage-1)*mappingRowsPerPage;
+  const pagedMappingIds=useMemo(()=>filteredMappingIds.slice(mappingStart,mappingStart+mappingRowsPerPage),[filteredMappingIds,mappingStart,mappingRowsPerPage]);
   const addFromData=(name)=>{
     const value=String(name||"").trim();
     if(!value)return;
@@ -1424,7 +1442,41 @@ function Mapping({settings,setSettings,identifiers,setIdentifiers,toast,rawData,
         <input ref={fRef} type="file" accept=".csv" style={{display:"none"}} onChange={onFile}/>
       </div>
       <div style={{display:"flex",gap:7,marginBottom:12}}><input placeholder="Or type ad set name manually..." value={adsetIn} onChange={e=>setAdsetIn(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addId()} style={{flex:1}}/><button className="btn btn-p" onClick={addId} style={{whiteSpace:"nowrap"}}>+ Add</button></div>
-      {ids.length>0&&(<><div className="id-hdr">{["Ad Set Name","Division","LOB","Segment","Objective",""] .map((h,i)=>(<div key={i} className="id-h">{h}</div>))}</div>{ids.map((id,i)=>(<div className="id-row" key={i}><input value={id.adset} onChange={e=>updId(i,"adset",e.target.value)} style={{fontSize:14,padding:"8px 10px"}}/><select value={id.division||""} onChange={e=>updId(i,"division",e.target.value)}><option value="">Select division</option>{(mappingOptions.divisions||DEFAULT_MAPPING_OPTIONS.divisions).map(d=><option key={d}>{d}</option>)}</select><select value={id.lob||""} onChange={e=>updId(i,"lob",e.target.value)}><option value="">Select LOB</option>{(mappingOptions.lobs||DEFAULT_MAPPING_OPTIONS.lobs).map(d=><option key={d}>{d}</option>)}</select><select value={id.segment||""} onChange={e=>updId(i,"segment",e.target.value)}><option value="">Select segment</option>{(mappingOptions.segments||DEFAULT_MAPPING_OPTIONS.segments).map(d=><option key={d}>{d}</option>)}</select><select value={id.objective||""} onChange={e=>updId(i,"objective",e.target.value)}><option value="">Select objective</option>{(mappingOptions.objectives||DEFAULT_MAPPING_OPTIONS.objectives).map(d=><option key={d}>{d}</option>)}</select><button className="rm-btn" onClick={()=>remId(i)}>×</button></div>))}</>)}
+      {ids.length>0&&(<>
+        <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
+          <input value={mappingSearch} onChange={e=>setMappingSearch(e.target.value)} placeholder="Search ad set name..." style={{flex:1,minWidth:180,maxWidth:300}}/>
+          <select value={mappingDivFilter} onChange={e=>setMappingDivFilter(e.target.value)} style={{width:"auto",minWidth:130,padding:"5px 8px",fontSize:13}}>
+            <option value="">All Divisions</option>
+            {(mappingOptions.divisions||DEFAULT_MAPPING_OPTIONS.divisions).map(d=><option key={d} value={d}>{d}</option>)}
+          </select>
+          <select value={mappingLobFilter} onChange={e=>setMappingLobFilter(e.target.value)} style={{width:"auto",minWidth:120,padding:"5px 8px",fontSize:13}}>
+            <option value="">All LOBs</option>
+            {(mappingOptions.lobs||DEFAULT_MAPPING_OPTIONS.lobs).map(d=><option key={d} value={d}>{d}</option>)}
+          </select>
+          <select value={mappingSegFilter} onChange={e=>setMappingSegFilter(e.target.value)} style={{width:"auto",minWidth:140,padding:"5px 8px",fontSize:13}}>
+            <option value="">All Segments</option>
+            {(mappingOptions.segments||DEFAULT_MAPPING_OPTIONS.segments).map(d=><option key={d} value={d}>{d}</option>)}
+          </select>
+          <select value={mappingObjFilter} onChange={e=>setMappingObjFilter(e.target.value)} style={{width:"auto",minWidth:140,padding:"5px 8px",fontSize:13}}>
+            <option value="">All Objectives</option>
+            {(mappingOptions.objectives||DEFAULT_MAPPING_OPTIONS.objectives).map(d=><option key={d} value={d}>{d}</option>)}
+          </select>
+          {(mappingSearch||mappingDivFilter||mappingLobFilter||mappingSegFilter||mappingObjFilter)&&<button className="btn" onClick={()=>{setMappingSearch("");setMappingDivFilter("");setMappingLobFilter("");setMappingSegFilter("");setMappingObjFilter("");}}>Clear all</button>}
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+          <div style={{fontSize:12,color:"#64748B"}}>{filteredMappingIds.length<ids.length?`Showing ${filteredMappingIds.length} of ${ids.length} identifiers`:`${ids.length} identifier${ids.length!==1?"s":""} total`} · Page {mappingSafePage}/{mappingTotalPages}</div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <label style={{margin:0,fontSize:11.5,color:"#64748B"}}>Rows/page</label>
+            <select value={mappingRowsPerPage} onChange={e=>setMappingRowsPerPage(Number(e.target.value)||20)} style={{width:"auto",padding:"5px 8px",fontSize:12}}>
+              {[20,50,100].map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+            <button className="btn" onClick={()=>setMappingPage(p=>Math.max(1,p-1))} disabled={mappingSafePage<=1}>Prev</button>
+            <button className="btn" onClick={()=>setMappingPage(p=>Math.min(mappingTotalPages,p+1))} disabled={mappingSafePage>=mappingTotalPages}>Next</button>
+          </div>
+        </div>
+        {filteredMappingIds.length===0&&<div className="empty" style={{padding:"16px 0"}}>No identifiers match your search.</div>}
+        {filteredMappingIds.length>0&&(<><div className="id-hdr">{["Ad Set Name","Division","LOB","Segment","Objective",""].map((h,i)=>(<div key={i} className="id-h">{h}</div>))}</div>{pagedMappingIds.map(({id,idx})=>(<div className="id-row" key={idx}><input value={id.adset} onChange={e=>updId(idx,"adset",e.target.value)} style={{fontSize:14,padding:"8px 10px"}}/><select value={id.division||""} onChange={e=>updId(idx,"division",e.target.value)}><option value="">Select division</option>{(mappingOptions.divisions||DEFAULT_MAPPING_OPTIONS.divisions).map(d=><option key={d}>{d}</option>)}</select><select value={id.lob||""} onChange={e=>updId(idx,"lob",e.target.value)}><option value="">Select LOB</option>{(mappingOptions.lobs||DEFAULT_MAPPING_OPTIONS.lobs).map(d=><option key={d}>{d}</option>)}</select><select value={id.segment||""} onChange={e=>updId(idx,"segment",e.target.value)}><option value="">Select segment</option>{(mappingOptions.segments||DEFAULT_MAPPING_OPTIONS.segments).map(d=><option key={d}>{d}</option>)}</select><select value={id.objective||""} onChange={e=>updId(idx,"objective",e.target.value)}><option value="">Select objective</option>{(mappingOptions.objectives||DEFAULT_MAPPING_OPTIONS.objectives).map(d=><option key={d}>{d}</option>)}</select><button className="rm-btn" onClick={()=>remId(idx)}>×</button></div>))}</>)}
+      </>)}
       {!ids.length&&<div className="empty" style={{padding:"16px 0"}}>No identifiers yet. Upload a CSV or add manually.</div>}
     </div>
     <div style={{display:"flex",gap:9}}><button className="btn btn-p" onClick={save}>Save Mapping</button><button className="btn" onClick={()=>{setLoc({...settings});setIds([...identifiers]);}}>Discard</button></div>
@@ -1477,30 +1529,55 @@ function Mapping({settings,setSettings,identifiers,setIdentifiers,toast,rawData,
   </div>);
 }
 
-function PublishModal({onClose,onConfirm,busy,result,error}){
+function WelcomePage({userEmail,isOwner,isEditor}){
+  const role=isOwner?"Owner":isEditor?"Editor":"Viewer";
+  const roleColor=isOwner?"#F59E0B":isEditor?"#3B82F6":"#14B8A6";
+  const card={background:"#0D1117",border:"1px solid #1A2B3E",borderRadius:12,padding:"20px 24px",marginBottom:18};
+  const h2={fontSize:13,fontWeight:700,textTransform:"uppercase",letterSpacing:".08em",color:"#60A5FA",marginBottom:12,display:"flex",alignItems:"center",gap:8};
+  const p={fontSize:13.5,color:"#94A3B8",lineHeight:1.75,margin:"0 0 10px"};
+  const pill=(label,color)=><span style={{display:"inline-block",background:color+"22",color,border:`1px solid ${color}44`,borderRadius:20,padding:"2px 10px",fontSize:12,fontWeight:600,marginLeft:6}}>{label}</span>;
+  const dot=<span style={{width:6,height:6,borderRadius:"50%",background:"#3B82F6",display:"inline-block",flexShrink:0,marginTop:5}}/>;
+  const row=(text)=><div style={{display:"flex",gap:10,marginBottom:7,color:"#94A3B8",fontSize:13.5,lineHeight:1.6}}>{dot}<span>{text}</span></div>;
   return(
-    <div style={{position:"fixed",inset:0,background:"rgba(2,6,23,.72)",display:"flex",alignItems:"center",justifyContent:"center",padding:14,zIndex:12000}} onClick={onClose}>
-      <div style={{width:"min(480px,96vw)",background:"#0D1117",border:"1px solid #1A2B3E",borderRadius:12,padding:"18px 20px"}} onClick={e=>e.stopPropagation()}>
-        <div style={{fontSize:15,fontWeight:600,color:"#BFDBFE",marginBottom:6}}>Publish to Cloudflare R2</div>
-        <div style={{fontSize:12.5,color:"#64748B",marginBottom:14}}>This will upload all data files to R2 and increment the manifest version. Viewers will pick up the update on their next visit.</div>
-        <div style={{background:"#070F1C",border:"1px solid #10203A",borderRadius:8,padding:"10px 13px",marginBottom:16,fontSize:12,color:"#60A5FA"}}>
-          <div style={{fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:".06em",fontSize:10}}>Files to publish</div>
-          {["meta-insights-cache.json","meta-budget-targets.json","meta-mappings.json","meta-selection-lists.json"].map(f=>(
-            <div key={f} style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}><span style={{width:4,height:4,borderRadius:"50%",background:"#3B82F6",display:"inline-block",flexShrink:0}}/><span style={{fontFamily:"'DM Mono',monospace",fontSize:11}}>{f}</span></div>
-          ))}
-        </div>
-        {result&&<div style={{background:"#071610",border:"1px solid #0E2818",borderRadius:8,padding:"10px 13px",marginBottom:12,fontSize:13,color:"#34D399"}}>Published as v{result.version} · {new Date(result.publishedAt).toLocaleString()}</div>}
-        {error&&<div style={{background:"#160707",border:"1px solid #2E1010",borderRadius:8,padding:"10px 13px",marginBottom:12,fontSize:13,color:"#F87171"}}>{error}</div>}
-        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
-          <button className="btn" onClick={onClose} disabled={busy}>{result?"Close":"Cancel"}</button>
-          {!result&&<button className="btn btn-p" onClick={onConfirm} disabled={busy} style={{display:"flex",alignItems:"center",gap:6}}>{busy&&<span className="spin"/>}{busy?"Publishing…":"Publish"}</button>}
-        </div>
+    <div style={{maxWidth:780,margin:"0 auto",padding:"28px 24px"}}>
+      <div style={{marginBottom:24}}>
+        <div style={{fontSize:22,fontWeight:700,color:"#F1F5F9",marginBottom:4}}>Welcome to EasyPC Marketing Hub</div>
+        <div style={{fontSize:13.5,color:"#64748B"}}>Your role: {pill(role,roleColor)} &nbsp;·&nbsp; Signed in as <span style={{color:"#93C5FD"}}>{userEmail||"—"}</span></div>
+      </div>
+
+      <div style={card}>
+        <div style={h2}><svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>About this App</div>
+        <p style={p}>The <strong style={{color:"#E2E8F0"}}>EasyPC Marketing Hub</strong> is a centralized marketing analytics dashboard built to track, analyze, and report on Meta (Facebook &amp; Instagram) advertising performance across all EasyPC business units.</p>
+        <p style={p}>This app originated from the <strong style={{color:"#E2E8F0"}}>General Marketing Data Analysis Tracker</strong> — originally created to consolidate Meta Ads data for marketing performance reporting. It has since evolved into a full-featured web app with live API syncing, multi-account aggregation, LOB dashboards, and role-based access control.</p>
+      </div>
+
+      <div style={card}>
+        <div style={h2}><svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>How It Works</div>
+        {row(<><strong style={{color:"#E2E8F0"}}>Data Sync —</strong> An Owner connects to the Meta Graph API via Settings, then fetches ad performance data (spend, inquiries, reach, impressions, CTR) directly from your Meta Business accounts. Data is stored in Cloudflare R2 cloud storage.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>Mapping —</strong> Each Meta ad set is mapped to a Division, Line of Business (LOB), Segment, and Objective. This mapping powers the LOB-specific dashboards (Desktop, LTS, LSA) and grouping charts.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>Budget &amp; Targets —</strong> Monthly spend budgets and inquiry targets are configured per LOB and segment. Dashboards show pacing progress against these targets in real time.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>Dashboards —</strong> Monthly Overview aggregates all LOBs. Individual dashboards (Desktop, LTS, LSA) show segment-level KPIs. Trends &amp; Graphs shows time-series data across any date range.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>All dates —</strong> are calculated in Philippine Time (UTC+8). Data syncs up to yesterday to ensure only complete daily data is shown.</>)}
+      </div>
+
+      <div style={card}>
+        <div style={h2}><svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>Security &amp; Access</div>
+        {row(<><strong style={{color:"#E2E8F0"}}>Microsoft Entra (Azure AD) —</strong> All users must sign in with their EasyPC Microsoft account. Unauthenticated users cannot access any part of the app.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>Role-based access —</strong> Owners have full access including Settings, Data sync, Budget/Target, and Mapping. Editors can manage Budget/Target and Mapping. Viewers see dashboards only.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>Credentials —</strong> Meta API tokens and R2 keys are stored as encrypted secrets in Cloudflare and are never exposed to the browser or end users.</>)}
+        {row(<><strong style={{color:"#E2E8F0"}}>Data storage —</strong> All marketing data is stored in a private Cloudflare R2 bucket (marketing-hub-data). No data is stored on any third-party service or public database.</>)}
+      </div>
+
+      <div style={{...card,marginBottom:0}}>
+        <div style={h2}><svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>Questions or Concerns?</div>
+        <p style={{...p,margin:0}}>If you have questions about data accuracy, access issues, or feature requests, please reach out to the app administrator: <a href="mailto:edward.cabalona@easypc.com.ph" style={{color:"#60A5FA",textDecoration:"none",fontWeight:600}}>edward.cabalona@easypc.com.ph</a></p>
       </div>
     </div>
   );
 }
 
 const NAV=[
+  {id:"welcome",   label:"Welcome",           g:"dash",icon:"M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"},
   {id:"overview",  label:"Monthly Overview",  g:"dash",icon:"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"},
   {id:"breakdown", label:"Monthly Breakdown", g:"dash",icon:"M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"},
   {id:"desktop",   label:"Desktop Dashboard", g:"dash",icon:"M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"},
@@ -1512,11 +1589,11 @@ const NAV=[
   {id:"mapping",   label:"Mapping",           g:"cfg", icon:"M7 7h10M7 12h10M7 17h6M4 7h.01M4 12h.01M4 17h.01"},
   {id:"data",      label:"Data",              g:"cfg", icon:"M4 7a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H6a2 2 0 01-2-2V7zm3 1h10m-10 4h10m-10 4h6"},
 ];
-const PT={overview:"Monthly Overview",breakdown:"Monthly Breakdown",desktop:"Desktop Dashboard",lts:"LTS Dashboard",lsa:"LSA Dashboard",trends:"Trends & Graphs",settings:"Settings",budget:"Budget and Target",mapping:"Mapping",data:"Data"};
+const PT={welcome:"Welcome",overview:"Monthly Overview",breakdown:"Monthly Breakdown",desktop:"Desktop Dashboard",lts:"LTS Dashboard",lsa:"LSA Dashboard",trends:"Trends & Graphs",settings:"Settings",budget:"Budget and Target",mapping:"Mapping",data:"Data"};
 
 export default function App(){
   const saved=loadLS();
-  const [page,setPage]=useState("overview");
+  const [page,setPage]=useState("welcome");
   const [navCollapsed,setNavCollapsed]=useState(false);
   const [theme,setTheme]=useState(loadTheme);
   const [settings,setSettings]=useState(()=>({...DEFAULT_SETTINGS,...(saved||{}),identifiers:undefined}));
@@ -1538,14 +1615,19 @@ export default function App(){
   const [orgAuthReady,setOrgAuthReady]=useState(false);
   const [orgAuthError,setOrgAuthError]=useState("");
   const [orgAccount,setOrgAccount]=useState(null);
+  const userEmail=useMemo(()=>String(orgAccount?.username||"").trim().toLowerCase(),[orgAccount]);
+  const isOwner=useMemo(()=>OWNER_EMAILS.length===0||OWNER_EMAILS.includes(userEmail),[userEmail]);
+  const isEditor=useMemo(()=>isOwner||EDITOR_EMAILS.includes(userEmail),[isOwner,userEmail]);
   const [toast,setToast]=useState(null);
-  const [publishModal,setPublishModal]=useState(false);
-  const [publishBusy,setPublishBusy]=useState(false);
-  const [publishResult,setPublishResult]=useState(null);
-  const [publishError,setPublishError]=useState(null);
   const localCacheInputRef=useRef(null);
   const showToast=(msg,isErr=false)=>{setToast({msg,isErr});setTimeout(()=>setToast(null),3500);};
   const protectedPage=!configUnlocked&&["settings","budget","mapping","data"].includes(page);
+  // Redirect users away from pages they don't have access to
+  useEffect(()=>{
+    if(!orgAccount)return;
+    if(!isOwner&&(page==="settings"||page==="data"))setPage("overview");
+    if(!isEditor&&(page==="budget"||page==="mapping"))setPage("overview");
+  },[orgAccount,isOwner,isEditor,page]);
   const allowedOrgEmails=useMemo(()=>new Set(AAD_ALLOWED_EMAILS),[]);
   const msalClient=useMemo(()=>{
     if(!AAD_TENANT_ID||!AAD_CLIENT_ID)return null;
@@ -1686,7 +1768,7 @@ export default function App(){
     if(LOCAL_ONLY)return;
     try{
       const r=await loadCachedFromApi();
-      setRawData(r.data||[]);
+      setRawData(r.rows||r.data||[]);
       setSyncStatus(null);
       if(r.meta){
         setFetchMeta(r.meta);
@@ -1759,18 +1841,6 @@ export default function App(){
 
   const persistBudgetTargets=useCallback(async(payload)=>{
     await saveBudgetTargetsToApi(payload);
-  },[]);
-
-  const handlePublish=useCallback(async()=>{
-    setPublishBusy(true);setPublishError(null);setPublishResult(null);
-    try{
-      const r=await publishToR2();
-      setPublishResult(r);
-      showToast(`Published as v${r.version} \u2713`);
-    }catch(e){
-      setPublishError(e.message||"Publish failed");
-      showToast(`Publish failed: ${e.message}`,true);
-    }finally{setPublishBusy(false);}
   },[]);
 
   const loginWithFacebook=useCallback(async()=>{
@@ -1875,7 +1945,7 @@ export default function App(){
     pollId=setInterval(poll,1200);
     try{
       const r=await fetchLiveData(settings.accessToken,settings.businessAccountId);
-      setRawData(r.data||[]);
+      setRawData(r.rows||r.data||[]);
       if(r.meta){
         const effectiveErrors=r.meta.syncedNow===false?[]:(r.meta.errors||[]);
         setFetchMeta({...r.meta,errors:effectiveErrors});
@@ -1958,16 +2028,10 @@ export default function App(){
           <div className="nav-lbl">Dashboards</div>
           <div className="nav-scroll">{NAV.filter(n=>n.g==="dash").map(n=>(<button key={n.id} title={n.label} className={`nav-item ${page===n.id?"active":""}`} onClick={()=>setPage(n.id)}><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={n.icon}/></svg><span className="nav-text">{n.label}</span></button>))}</div>
         </nav>
-        <nav className="nav-sec">
+        {isEditor&&<nav className="nav-sec">
           <div className="nav-lbl">Config</div>
-          <div className="nav-scroll">{NAV.filter(n=>n.g==="cfg").map(n=>(<button key={n.id} title={n.label} className={`nav-item ${page===n.id?"active":""}`} onClick={()=>setPage(n.id)}><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={n.icon}/></svg><span className="nav-text">{n.label}</span></button>))}</div>
-        </nav>
-        <div style={{padding:"10px 9px 4px"}}>
-          <button className="btn btn-p" onClick={()=>{setPublishModal(true);setPublishResult(null);setPublishError(null);}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
-            <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-            <span className="nav-text">Publish</span>
-          </button>
-        </div>
+          <div className="nav-scroll">{NAV.filter(n=>n.g==="cfg"&&(isOwner||(n.id!=="settings"&&n.id!=="data"))).map(n=>(<button key={n.id} title={n.label} className={`nav-item ${page===n.id?"active":""}`} onClick={()=>setPage(n.id)}><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={n.icon}/></svg><span className="nav-text">{n.label}</span></button>))}</div>
+        </nav>}
         <div className="sb-bot">
           <div className="sb-meta">
             <div className="org-user-chip" title={LOCAL_ONLY?"Local mode":(orgAccount?.username||"")}>{LOCAL_ONLY?"Local Mode":(orgAccount?.username||"Signed in")}</div>
@@ -2023,6 +2087,7 @@ export default function App(){
         <div className="scroll-area">
           {apiErrors.length>0&&<div className="err-box">{apiErrors.map((e,i)=><div key={i}>{e.accountId?`Account ${e.accountId}: `:""}{e.error}</div>)}</div>}
           {loading&&page!=="data"?(<div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,padding:60,color:"#2D3B50",fontSize:14}}><span className="spin"/>Fetching from Meta API…</div>):(<div key={page} className="page-switch">
+            {page==="welcome"   &&<WelcomePage userEmail={userEmail} isOwner={isOwner} isEditor={isEditor}/>}
             {page==="overview"  &&<Overview data={monthData} month={month} settings={settings}/>}
             {page==="breakdown" &&<Breakdown data={monthData}/>}
             {page==="desktop"   &&<LobDash data={monthData} allData={allMappedData} lob="Desktop" segments={DESKTOP_DASH_SEGMENTS} colors={[COLORS.blue,COLORS.indigo,COLORS.purple,COLORS.coral,COLORS.teal]} settings={settings} month={month} bKey="desktop" tKey="desktop" allowedDivisions={["Retail"]} allowedLobs={["Desktop"]} allowedSegments={DESKTOP_DASH_SEGMENTS} allowedObjectives={["Inquiry","Engagement"]} monthlyBudgetMap={settings.desktopBudgets} monthlyTargetMap={settings.desktopTargets} budgetKeys={DESKTOP_DASH_SEGMENTS} targetKeys={DESKTOP_INQUIRY_TARGET_KEYS}/>}
@@ -2038,6 +2103,5 @@ export default function App(){
       </div>
     </div>
     {toast&&<div className={`toast ${toast.isErr?"ter":"tok"}`}>{toast.msg}</div>}
-    {publishModal&&<PublishModal onClose={()=>setPublishModal(false)} onConfirm={handlePublish} busy={publishBusy} result={publishResult} error={publishError}/>}
   </>);
 }
