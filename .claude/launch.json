@@ -1,0 +1,26 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sourcecode (EasyPC Marketing Hub)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173,
+      "cwd": "C:/DevProjects/marketing_hubV2/sourcecode"
+    },
+    {
+      "name": "admin (EasyPC Admin Hub)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5174"],
+      "port": 5174,
+      "cwd": "C:/DevProjects/marketing_hubV2/admin"
+    },
+    {
+      "name": "viewer (EasyPC Marketing Viewer)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5175"],
+      "port": 5175,
+      "cwd": "C:/DevProjects/marketing_hubV2/viewer"
+    }
+  ]
+}
